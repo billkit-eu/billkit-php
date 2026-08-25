@@ -1,0 +1,53 @@
+{
+    "name": "billkit-eu/billkit-php",
+    "description": "Official PHP SDK for BillKit: a Stripe-Billing-shape multi-tenant SaaS API on Mollie.",
+    "type": "library",
+    "license": "Apache-2.0",
+    "homepage": "https://billkit.eu",
+    "keywords": ["billkit", "billing", "subscriptions", "mollie", "stripe", "saas", "eu"],
+    "authors": [
+        { "name": "BillKit", "email": "sdk@billkit.eu" }
+    ],
+    "support": {
+        "issues": "https://github.com/billkit-eu/billkit-php/issues",
+        "source": "https://github.com/billkit-eu/billkit-php",
+        "docs": "https://docs.billkit.eu"
+    },
+    "require": {
+        "php": ">=8.1",
+        "ext-curl": "*",
+        "ext-json": "*",
+        "psr/http-client": "^1.0",
+        "psr/http-factory": "^1.0",
+        "psr/log": "^1.1 || ^2.0 || ^3.0"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.5",
+        "phpstan/phpstan": "^2.0",
+        "friendsofphp/php-cs-fixer": "^3.64",
+        "nyholm/psr7": "^1.8"
+    },
+    "suggest": {
+        "php-http/discovery": "Auto-wire a PSR-18 HTTP client + PSR-17 factories instead of the bundled curl transport."
+    },
+    "autoload": {
+        "psr-4": { "BillKit\\": "src/" }
+    },
+    "autoload-dev": {
+        "psr-4": { "BillKit\\Tests\\": "tests/" }
+    },
+    "scripts": {
+        "test": "phpunit",
+        "analyse": "phpstan analyse --memory-limit=1G",
+        "cs": "php-cs-fixer fix --diff",
+        "cs:check": "php-cs-fixer fix --dry-run --diff"
+    },
+    "config": {
+        "sort-packages": true,
+        "platform": {
+            "php": "8.1.99"
+        },
+        "allow-plugins": {}
+    },
+    "minimum-stability": "stable"
+}

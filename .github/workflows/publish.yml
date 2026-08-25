@@ -1,0 +1,52 @@
+name: Release gate
+
+# Triggered by pushing a tag of the form ``vX.Y.Z``. Packagist publishes by
+# git tag through its GitHub App, so this workflow does not push to a registry.
+# It asserts the tag matches the VERSION constant and runs the full gate before
+# the tag counts as released.
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  gate:
+    name: Gate + notify Packagist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up PHP 8.1
+        uses: shivammathur/setup-php@2.37.2
+        with:
+          php-version: '8.1'
+          extensions: curl, json, mbstring
+          coverage: none
+          tools: composer:v2
+      - name: Verify tag matches Version::VERSION
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(php -r "require 'src/Version.php'; echo BillKit\\\\Version::VERSION;")"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag ($TAG_VERSION) does not match Version::VERSION ($PKG_VERSION)."
+            exit 1
+          fi
+      - name: Install
+        run: composer install --no-interaction --no-progress
+      - name: PHPStan
+        run: composer analyse
+      - name: Code style
+        run: composer cs:check
+      - name: Test
+        run: composer test
+      - name: Notify Packagist (optional)
+        env:
+          PACKAGIST_USERNAME: ${{ secrets.PACKAGIST_USERNAME }}
+          PACKAGIST_TOKEN: ${{ secrets.PACKAGIST_TOKEN }}
+        run: |
+          if [ -z "$PACKAGIST_TOKEN" ]; then
+            echo "No PACKAGIST_TOKEN set; relying on the Packagist GitHub App to auto-sync the tag."
+            exit 0
+          fi
+          curl -sf -XPOST -H 'content-type:application/json' \
+            "https://packagist.org/api/update-package?username=$PACKAGIST_USERNAME&apiToken=$PACKAGIST_TOKEN" \
+            -d '{"repository":{"url":"https://github.com/billkit-eu/billkit-php"}}'
