@@ -25,7 +25,7 @@ final class ClientTest extends TestCase
 
     public function testFallsBackToEnvApiKey(): void
     {
-        putenv('BILLKIT_API_KEY=sk_test_from_env');
+        putenv('BILLKIT_API_KEY=bk_test_from_env');
         $http = (new MockHttpClient())->stage(200, ['id' => 'cus_1']);
         $psr17 = new Psr17Factory();
         $client = new BillKitClient(
@@ -36,12 +36,12 @@ final class ClientTest extends TestCase
 
         $client->customers->retrieve('cus_1');
 
-        self::assertSame('Bearer sk_test_from_env', $http->lastRequest()->getHeaderLine('Authorization'));
+        self::assertSame('Bearer bk_test_from_env', $http->lastRequest()->getHeaderLine('Authorization'));
     }
 
     public function testInjectingPsrClientWithoutFactoriesThrows(): void
     {
         $this->expectException(\InvalidArgumentException::class);
-        new BillKitClient(apiKey: 'sk_test_unit', httpClient: new MockHttpClient());
+        new BillKitClient(apiKey: 'bk_test_unit', httpClient: new MockHttpClient());
     }
 }

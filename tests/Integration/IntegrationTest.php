@@ -69,7 +69,7 @@ final class IntegrationTest extends TestCase
     /** Only scenarios in this family are required of the php SDK. */
     private const FAMILY = 'server';
 
-    private const SECRET = 'whsec_integration_secret';
+    private const SECRET = 'bkwhsec_integration_secret';
 
     /** @var array{api_key: string, tenant_id: string, mollie_route_id: string, session_token: string}|null */
     private static ?array $tenant = null;
@@ -197,7 +197,7 @@ final class IntegrationTest extends TestCase
     public function testAuthBadKey(): void
     {
         $this->expectException(AuthenticationException::class);
-        $this->client('sk_test_0000000000000000000000')->products->all();
+        $this->client('bk_test_0000000000000000000000')->products->all();
     }
 
     public function testAuthScopedKeyDenied(): void
@@ -351,12 +351,12 @@ final class IntegrationTest extends TestCase
             'description' => 'php integration suite',
         ]);
         // The signing secret is returned exactly once, on create.
-        self::assertStringStartsWith('whsec_', (string) $created['secret']);
+        self::assertStringStartsWith('bkwhsec_', (string) $created['secret']);
 
         $c->webhookEndpoints->update((string) $created['id'], ['description' => 'renamed']);
 
         $rotated = $c->webhookEndpoints->rotateSecret((string) $created['id']);
-        self::assertStringStartsWith('whsec_', (string) $rotated['secret']);
+        self::assertStringStartsWith('bkwhsec_', (string) $rotated['secret']);
         self::assertNotSame($created['secret'], $rotated['secret']);
 
         // Disabling stops delivery and keeps everything else, so the

@@ -125,7 +125,7 @@ final class LoggingTest extends BillKitTestCase
 
         $blob = $logger->blob();
         self::assertNotSame('', $blob, 'Expected log records; the rest would pass vacuously.');
-        self::assertStringNotContainsString('sk_test_unit', $blob, 'The API key reached a log record.');
+        self::assertStringNotContainsString('bk_test_unit', $blob, 'The API key reached a log record.');
         self::assertStringNotContainsString('Bearer', $blob, 'The Authorization header reached a log record.');
         self::assertStringNotContainsString('ada@example.com', $blob, 'A body (PII) reached a log record.');
         self::assertStringNotContainsString('Ada Lovelace', $blob, 'A body (PII) reached a log record.');

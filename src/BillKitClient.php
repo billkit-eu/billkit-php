@@ -32,7 +32,7 @@ use Psr\Log\LoggerInterface;
  * Wraps a single {@see Transport} and exposes every resource family as a
  * public readonly property:
  *
- *     $client = new \BillKit\BillKitClient('sk_test_...');
+ *     $client = new \BillKit\BillKitClient('bk_test_...');
  *     $customer = $client->customers->create(['email' => 'ada@example.com']);
  *     $product  = $client->products->create(['name' => 'Pro']);
  *     $price    = $client->prices->create([

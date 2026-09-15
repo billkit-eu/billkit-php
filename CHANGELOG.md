@@ -8,7 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versioning is independent of the Node and Python SDKs; each ships on its own
 cadence.
 
-## [Unreleased]
+## [0.2.1]
+
+### Changed
+- Documentation only. API keys are now `bk_live_…` / `bk_test_…` and webhook
+  signing secrets `bkwhsec_…`; every example here used the previous
+  Stripe-shaped `sk_`/`whsec_` spelling. No code in this package changed: it
+  never parsed the prefix, it forwards the key as a bearer token.
+
+## [0.2.0]
 
 ### Added
 - `$client->prices->update($id, ['active' => false])` archives a price through
@@ -68,7 +76,7 @@ First public release.
   to see the request/retry lifecycle:
 
   ```php
-  $client = new BillKitClient(apiKey: 'sk_test_...', logger: $monolog);
+  $client = new BillKitClient(apiKey: 'bk_test_...', logger: $monolog);
   ```
 
   Omitted (the default) the SDK uses a `NullLogger` and writes nowhere, so it
