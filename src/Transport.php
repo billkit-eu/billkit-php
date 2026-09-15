@@ -255,7 +255,7 @@ final class Transport
         $raw = curl_exec($ch);
         if ($raw === false) {
             throw new ApiConnectionException(
-                curl_error($ch) !== '' ? curl_error($ch) : 'curl request failed',
+                curl_error($ch) !== '' ? self::stripQueryStrings(curl_error($ch)) : 'curl request failed',
             );
         }
         $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
@@ -310,7 +310,14 @@ final class Transport
         try {
             $response = $client->sendRequest($request);
         } catch (ClientExceptionInterface $err) {
-            throw new ApiConnectionException($err->getMessage());
+            // Sanitised, not copied. Guzzle and friends build their
+            // connection-failure messages by interpolating the full
+            // request URI ("cURL error 6: ... for https://api.billkit.eu/
+            // v1/customers?email=ada@example.com"), which puts back
+            // exactly the query string the rest of this class is careful
+            // to strip — and this message lands in the caller's exception
+            // handler, their error tracker, and their logs.
+            throw new ApiConnectionException(self::stripQueryStrings($err->getMessage()));
         }
 
         $respHeaders = [];
@@ -335,6 +342,33 @@ final class Transport
         $normalised = str_starts_with($path, '/') ? $path : '/' . $path;
 
         return $this->baseUrl . $normalised;
+    }
+
+    /**
+     * Truncate every `http(s)://…` URL in `$message` at its `?`.
+     *
+     * The counterpart to {@see self::logSafeUrl()} for text the SDK did
+     * not write. HTTP-client libraries interpolate the full request URI
+     * into their connection-failure messages, and BillKit list filters
+     * routinely carry `?email=ada@example.com`, so re-emitting such a
+     * message verbatim would leak customer PII into the caller's logs
+     * through the one path that never passed through our own formatting.
+     *
+     * Only the query is dropped; scheme, host and path are what make the
+     * message diagnosable, and none of them carry tenant data.
+     */
+    private static function stripQueryStrings(string $message): string
+    {
+        $sanitised = preg_replace(
+            '~(https?://[^\s\'"<>]*?)\?[^\s\'"<>]*~i',
+            '$1',
+            $message,
+        );
+
+        // `preg_replace` returns null only on a PCRE failure. Falling back
+        // to the raw message would defeat the point, so fall back to the
+        // safe direction instead.
+        return $sanitised ?? 'The HTTP client reported a connection failure.';
     }
 
     /**

@@ -32,7 +32,12 @@ final class Products extends BaseResource
     }
 
     /**
-     * Patch mutable fields on a product.
+     * Patch mutable fields on a product, or archive it.
+     *
+     * `['active' => false]` archives: the product stops being offered and
+     * a checkout against any of its prices is refused. It keeps its id
+     * and stays readable, because what was sold under it has to be, which
+     * is why there is no delete. `['active' => true]` un-archives.
      *
      * @param array<string, mixed> $params
      *
@@ -41,16 +46,6 @@ final class Products extends BaseResource
     public function update(string $id, array $params): array
     {
         return $this->post("/v1/products/{$id}", $params);
-    }
-
-    /**
-     * Archive a product.
-     *
-     * @return array<string, mixed>
-     */
-    public function delete(string $id, ?string $idempotencyKey = null): array
-    {
-        return $this->del("/v1/products/{$id}", $idempotencyKey);
     }
 
     /**

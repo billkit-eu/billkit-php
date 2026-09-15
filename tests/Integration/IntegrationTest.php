@@ -42,10 +42,12 @@ final class IntegrationTest extends TestCase
         'auth.scoped_key_denied',
         'crud.product',
         'crud.price',
+        'crud.price_archive',
         'crud.customer',
         'crud.coupon',
         'crud.tax_rate',
         'crud.webhook_endpoint',
+        'filters.subscription_renewal_state',
         'pagination.has_more',
         'pagination.auto_iter',
         'idempotency.replay',
@@ -56,6 +58,9 @@ final class IntegrationTest extends TestCase
         'money.partial_refund',
         'money.over_refund_rejected',
         'money.dispute_opened',
+        'usage.record_and_replay',
+        'usage.list_reconciliation',
+        'usage.non_metered_rejected',
         'webhooks.verify_roundtrip',
         'webhooks.reject_tampered',
         'webhooks.reject_stale',
@@ -101,7 +106,7 @@ final class IntegrationTest extends TestCase
      *
      * @return array{product: array<string, mixed>, price: array<string, mixed>}
      */
-    private function makePlan(BillKitClient $c, int $amountCents = 2500): array
+    private function makePlan(BillKitClient $c, int $amountCents = 2500, ?string $usageType = null): array
     {
         $product = $c->products->create(['name' => 'Plan ' . IntegrationHarness::idemKey()]);
         $price = $c->prices->create([
@@ -109,9 +114,27 @@ final class IntegrationTest extends TestCase
             'amount_cents' => $amountCents,
             'currency' => 'EUR',
             'interval' => 'month',
+            'usage_type' => $usageType,
         ]);
 
         return ['product' => $product, 'price' => $price];
+    }
+
+    /**
+     * Mint an ACTIVE subscription on `$priceId` and return it.
+     *
+     * Same machinery as the money specs: checkout -> settle at the fake
+     * Mollie -> deliver the webhook, then find the subscription by price.
+     *
+     * @return array<string, mixed>
+     */
+    private function activeSubscription(BillKitClient $c, string $priceId): array
+    {
+        $this->checkoutToActive($c, $priceId);
+        $sub = $this->findSubscription($c, $priceId);
+        self::assertSame('active', $sub['status']);
+
+        return $sub;
     }
 
     /**
@@ -203,7 +226,11 @@ final class IntegrationTest extends TestCase
             'Round Trip v2',
             $c->products->update((string) $created['id'], ['name' => 'Round Trip v2'])['name'],
         );
-        self::assertFalse($c->products->delete((string) $created['id'])['active']);
+        // Archive is the update route: the product has no delete, because
+        // an archived product stays readable.
+        self::assertFalse(
+            $c->products->update((string) $created['id'], ['active' => false])['active'],
+        );
     }
 
     public function testCrudPrice(): void
@@ -220,6 +247,34 @@ final class IntegrationTest extends TestCase
         self::assertContains($price['id'], array_column($filtered['data'], 'id'));
     }
 
+    public function testCrudPriceArchive(): void
+    {
+        $c = $this->client();
+        ['product' => $product, 'price' => $price] = $this->makePlan($c, 777);
+
+        $archived = $c->prices->update((string) $price['id'], ['active' => false]);
+        self::assertSame($price['id'], $archived['id']);
+        self::assertFalse($archived['active']);
+
+        // Archiving is not a delete: the row survives, so a subscription
+        // still pointing at it can be read back rather than dangling.
+        self::assertFalse($c->prices->retrieve((string) $price['id'])['active']);
+        $listed = $c->prices->all(['product_id' => $product['id']]);
+        self::assertContains($price['id'], array_column($listed['data'], 'id'));
+
+        // Re-archiving returns it unchanged instead of erroring, which is
+        // what makes a retried archive safe.
+        $again = $c->prices->update((string) $price['id'], ['active' => false]);
+        self::assertSame($price['id'], $again['id']);
+        self::assertFalse($again['active']);
+
+        // `active` moves both ways, and the money-bearing fields survive
+        // the round trip, which is the immutability claim that matters.
+        $back = $c->prices->update((string) $price['id'], ['active' => true]);
+        self::assertTrue($back['active']);
+        self::assertSame(777, $back['amount_cents']);
+    }
+
     public function testCrudCustomer(): void
     {
         $c = $this->client();
@@ -231,7 +286,13 @@ final class IntegrationTest extends TestCase
             $c->customers->update((string) $created['id'], ['name' => 'Ada L.'])['name'],
         );
 
-        $c->customers->delete((string) $created['id']);
+        // The customer leaves the API, so the body is a marker, not a row.
+        $deleted = $c->customers->delete((string) $created['id']);
+        self::assertSame(
+            ['id' => $created['id'], 'object' => 'customer', 'deleted' => true],
+            $deleted,
+        );
+
         $page = $c->customers->all(['limit' => 100]);
         self::assertNotContains($created['id'], array_column($page['data'], 'id'));
     }
@@ -250,11 +311,14 @@ final class IntegrationTest extends TestCase
         self::assertTrue($c->coupons->validate(['code' => $code])['valid']);
 
         $c->coupons->update((string) $created['id'], ['max_redemptions' => 5]);
-        $c->coupons->delete((string) $created['id']);
+        $c->coupons->update((string) $created['id'], ['active' => false]);
 
-        // A deleted coupon must stop validating, otherwise a revoked
-        // discount would keep applying at checkout.
+        // A withdrawn coupon must stop validating, otherwise a retired
+        // discount would keep applying at checkout...
         self::assertFalse($c->coupons->validate(['code' => $code])['valid']);
+        // ...while staying readable, because a discount already applied to
+        // a live subscription has to be traceable to the coupon behind it.
+        self::assertFalse($c->coupons->retrieve((string) $created['id'])['active']);
     }
 
     public function testCrudTaxRate(): void
@@ -270,7 +334,12 @@ final class IntegrationTest extends TestCase
             900,
             $c->taxRates->update((string) $created['id'], ['rate_basis_points' => 900])['rate_basis_points'],
         );
-        $c->taxRates->delete((string) $created['id']);
+        // Retiring is an update, and the rate stays readable: an invoice
+        // records the percentage it charged, not the rate row.
+        self::assertFalse(
+            $c->taxRates->update((string) $created['id'], ['active' => false])['active'],
+        );
+        self::assertFalse($c->taxRates->retrieve((string) $created['id'])['active']);
     }
 
     public function testCrudWebhookEndpoint(): void
@@ -290,7 +359,60 @@ final class IntegrationTest extends TestCase
         self::assertStringStartsWith('whsec_', (string) $rotated['secret']);
         self::assertNotSame($created['secret'], $rotated['secret']);
 
-        $c->webhookEndpoints->delete((string) $created['id']);
+        // Disabling stops delivery and keeps everything else, so the
+        // endpoint is still listed and can be turned back on.
+        $disabled = $c->webhookEndpoints->update((string) $created['id'], [
+            'status' => 'disabled',
+        ]);
+        self::assertSame('disabled', $disabled['status']);
+        $page = $c->webhookEndpoints->all(['limit' => 100]);
+        self::assertContains($created['id'], array_column($page['data'], 'id'));
+
+        // Deleting is the other act, and it is a real one: a URL
+        // registered by mistake leaves the account rather than sitting
+        // there disabled for good.
+        $gone = $c->webhookEndpoints->delete((string) $created['id']);
+        self::assertSame(
+            ['id' => $created['id'], 'object' => 'webhook_endpoint', 'deleted' => true],
+            $gone,
+        );
+        $after = $c->webhookEndpoints->all(['limit' => 100]);
+        self::assertNotContains($created['id'], array_column($after['data'], 'id'));
+
+        $this->expectException(ResourceMissingException::class);
+        $c->webhookEndpoints->retrieve((string) $created['id']);
+    }
+
+    // ── filters ──────────────────────────────────────────────────────
+
+    public function testFiltersSubscriptionRenewalState(): void
+    {
+        $c = $this->client();
+        $price = $this->makePlan($c, 1500)['price'];
+        $sub = $this->activeSubscription($c, (string) $price['id']);
+
+        $paused = $c->subscriptions->pause((string) $sub['id']);
+        // The whole point: pausing lands in renewal_state and leaves status
+        // alone, because the customer has paid for the period they are in.
+        self::assertSame('paused', $paused['renewal_state']);
+        self::assertSame('active', $paused['status']);
+
+        $byRenewalState = $c->subscriptions->all(['renewal_state' => 'paused', 'limit' => 100]);
+        self::assertContains($sub['id'], array_column($byRenewalState['data'], 'id'));
+
+        // ...and it is still an `active` subscription to the status filter.
+        $byStatus = $c->subscriptions->all(['status' => 'active', 'limit' => 100]);
+        self::assertContains($sub['id'], array_column($byStatus['data'], 'id'));
+
+        // `status=paused` is not a value the API accepts. It used to be, and
+        // returned a confident, wrong, empty page; now it is refused so the
+        // mistake is visible.
+        try {
+            $c->subscriptions->all(['status' => 'paused']);
+            self::fail('status=paused should be rejected');
+        } catch (InvalidRequestException $e) {
+            self::assertSame('status', $e->param);
+        }
     }
 
     // ── pagination ───────────────────────────────────────────────────
@@ -455,6 +577,75 @@ final class IntegrationTest extends TestCase
             $match[0]['id'],
             $c->disputes->retrieve((string) $match[0]['id'])['id'],
         );
+    }
+
+    // ── usage ────────────────────────────────────────────────────────
+
+    public function testUsageRecordAndReplay(): void
+    {
+        $c = $this->client();
+        $price = $this->makePlan($c, 5, 'metered')['price'];
+        $sub = $this->activeSubscription($c, (string) $price['id']);
+
+        $key = IntegrationHarness::idemKey();
+        $record = $c->subscriptions->createUsageRecord((string) $sub['id'], [
+            'quantity' => 42,
+            'metadata' => ['source' => 'php-it'],
+            'idempotency_key' => $key,
+        ]);
+        self::assertSame('usage_record', $record['object']);
+        self::assertSame($sub['id'], $record['subscription_id']);
+        self::assertSame(42, $record['quantity']);
+        self::assertNull($record['invoice_id']);
+
+        // Replaying the same key must return the same record, not
+        // double-count the usage: that is what makes at-least-once
+        // reporting pipelines safe to retry.
+        $replay = $c->subscriptions->createUsageRecord((string) $sub['id'], [
+            'quantity' => 42,
+            'metadata' => ['source' => 'php-it'],
+            'idempotency_key' => $key,
+        ]);
+        self::assertSame($record['id'], $replay['id']);
+    }
+
+    public function testUsageListReconciliation(): void
+    {
+        $c = $this->client();
+        $price = $this->makePlan($c, 3, 'metered')['price'];
+        $sub = $this->activeSubscription($c, (string) $price['id']);
+
+        $posted = [];
+        foreach ([10, 20, 30] as $quantity) {
+            $posted[] = $c->subscriptions->createUsageRecord(
+                (string) $sub['id'],
+                ['quantity' => $quantity],
+            )['id'];
+        }
+
+        $pending = $c->subscriptions->listUsageRecords((string) $sub['id'], [
+            'invoice_id' => 'pending',
+            'limit' => 100,
+        ]);
+        self::assertSame('list', $pending['object']);
+        $ids = array_column($pending['data'], 'id');
+        foreach ($posted as $recordId) {
+            self::assertContains($recordId, $ids);
+        }
+        // Nothing pending may already claim an invoice.
+        foreach ($pending['data'] as $row) {
+            self::assertNull($row['invoice_id']);
+        }
+    }
+
+    public function testUsageNonMeteredRejected(): void
+    {
+        $c = $this->client();
+        $price = $this->makePlan($c, 2500)['price'];
+        $sub = $this->activeSubscription($c, (string) $price['id']);
+
+        $this->expectException(InvalidRequestException::class);
+        $c->subscriptions->createUsageRecord((string) $sub['id'], ['quantity' => 1]);
     }
 
     // ── webhooks ─────────────────────────────────────────────────────

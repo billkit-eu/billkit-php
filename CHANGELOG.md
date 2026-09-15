@@ -8,6 +8,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versioning is independent of the Node and Python SDKs; each ships on its own
 cadence.
 
+## [Unreleased]
+
+### Added
+- `$client->prices->update($id, ['active' => false])` archives a price through
+  `POST /v1/prices/{id}`. The price keeps its id and stays readable through
+  `retrieve()` and `all()`, because subscriptions renew against it by id.
+  Subscriptions already on it keep renewing; what stops is new business.
+  Re-archiving is a no-op that returns the price unchanged, so a retry is safe.
+  `active` is the only field a price accepts and `['active' => true]` is
+  refused, because prices are immutable.
+- `$client->subscriptions->autoPagingIterator()` takes a `$filters` array,
+  carried onto every page request, matching `autoPagingIteratorUsageRecords()`.
+  Filtering a multi-page walk after the fact means paging the whole history to
+  find the tail of the match.
+
+### Removed
+- `delete()` on `products`, `prices`, `coupons`, `taxRates` and
+  `webhookEndpoints`. None of them deleted anything: every one of those rows
+  stays readable afterwards, which is why they have to. Retire them through the
+  update route instead — `['active' => false]` for products, prices, tax rates
+  and coupons, `['status' => 'disabled']` for webhook endpoints. The server no
+  longer answers `DELETE` on those paths at all.
+
+### Changed
+- `$client->customers->delete($id)` returns
+  `['id' => ..., 'object' => 'customer', 'deleted' => true]` instead of the
+  customer. The customer leaves the API, so returning a body that reads like a
+  live resource said the opposite of what happened.
+- `$client->subscriptions->all()` documents `customer_id`, `status` and
+  `renewal_state`, each of which the API accepts as a comma-separated list.
+  Paused subscriptions are found with `['renewal_state' => 'paused']`;
+  `['status' => 'paused']` is no longer accepted by the API and throws
+  `InvalidRequestException`, because pausing sets `renewal_state` and leaves
+  `status` at `active`.
+
 ## [0.1.0]
 
 First public release.

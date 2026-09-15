@@ -231,21 +231,73 @@ page) and `autoPagingIterator()` (walk all pages).
 | `$client->...` | Methods |
 |--------------|---------|
 | `customers` | create, retrieve, update, delete, all, autoPagingIterator, setVatNumber, purge |
-| `products` | create, retrieve, update, delete, all, autoPagingIterator |
-| `prices` | create, retrieve, all, autoPagingIterator |
+| `products` | create, retrieve, update (archive with `['active' => false]`), all, autoPagingIterator |
+| `prices` | create, retrieve, update (archive with `['active' => false]`), all, autoPagingIterator |
 | `checkoutSessions` | create, retrieve |
 | `oneShotPayments` | create, retrieve |
-| `subscriptions` | retrieve, all, autoPagingIterator, cancel, pause, resume, reactivate, previewUpdate, update, reauthorizePaymentMethod |
+| `subscriptions` | retrieve, all, autoPagingIterator (filter by `customer_id`, `status`, `renewal_state`), cancel, pause, resume, reactivate, previewUpdate, update, reauthorizePaymentMethod |
 | `refunds` | create, retrieve, all, autoPagingIterator |
-| `webhookEndpoints` | create, retrieve, update, delete, rotateSecret, all, autoPagingIterator, allDeliveries, autoPagingIteratorDeliveries, retrieveDelivery, redeliver |
+| `webhookEndpoints` | create, retrieve, update (retire with `['status' => 'disabled']`), rotateSecret, all, autoPagingIterator, allDeliveries, autoPagingIteratorDeliveries, retrieveDelivery, redeliver |
 | `events` | retrieve, all, autoPagingIterator |
 | `tenant` | capabilities, portalBranding, setPortalBranding, rotateProviderCredential |
-| `coupons` | create, retrieve, update, delete, validate, all, autoPagingIterator |
-| `taxRates` | create, retrieve, update, delete, all, autoPagingIterator |
+| `coupons` | create, retrieve, update (withdraw with `['active' => false]`), validate, all, autoPagingIterator |
+| `taxRates` | create, retrieve, update (retire with `['active' => false]`), all, autoPagingIterator |
 | `invoices` | retrieve, all, autoPagingIterator |
 | `auditLogs` | retrieve, all, autoPagingIterator |
 | `payments` | retrieve, all, autoPagingIterator |
 | `billingPortalSessions` | create, revoke |
+
+### Retiring something, and deleting something
+
+`delete()` exists on `customers` and `webhookEndpoints`, and it returns `['id' => ..., 'object' => ..., 'deleted' => true]` rather than the object: it has left the API, so there is nothing to hand back. A deleted endpoint takes its delivery rows with it, because those are readable only through the endpoint that owns them; the events stay in `$client->events`, which is the record of what you were sent.
+
+The catalogue is retired through its update route instead, because it stays readable afterwards. Prices, products, tax rates and coupons take `['active' => false]`. Each of them has to survive: subscriptions renew against a price by id, an invoice records the VAT percentage a tax rate produced, and a redeemed coupon is part of what a customer was charged.
+
+`['status' => 'disabled']` on a webhook endpoint is the other half of the pair, not a substitute for deleting. It stops delivery and keeps the endpoint, its secret and its history, and it can be turned back on.
+
+A price accepts `active` and nothing else, because the amount, currency and interval are fixed at creation. `active` itself moves both ways: it decides what new checkouts may buy, not what anyone was charged.
+
+```php
+// Stop selling a price. It stays readable; customers on it keep renewing.
+$archived = $client->prices->update($price['id'], ['active' => false]);
+
+// Stop sending to an endpoint, without losing its signing secret.
+$client->webhookEndpoints->update($endpoint['id'], ['status' => 'disabled']);
+
+// Remove one entirely, along with its delivery rows.
+$client->webhookEndpoints->delete($endpoint['id']); // => ['deleted' => true, ...]
+
+// Remove a customer. Refused while they hold a subscription that can
+// still charge them.
+$client->customers->delete($customer['id']); // => ['deleted' => true, ...]
+```
+
+### Finding paused subscriptions
+
+`status` and `renewal_state` answer different questions, and only one of them knows about pausing. `status` is where the subscription stands with its payments (`incomplete`, `trialing`, `active`, `past_due`, `canceled`). `renewal_state` is what happens when the current period ends (`auto_renew`, `paused`, `canceling`, `stopped`). Pausing sets `renewal_state` and leaves `status` at `active`, because the customer has paid for the period they are in:
+
+```php
+$paused = $client->subscriptions->all(['renewal_state' => 'paused']);
+
+// Both filters take a comma-separated list, and carry onto every page:
+foreach ($client->subscriptions->autoPagingIterator(100, ['status' => 'active,past_due']) as $sub) {
+    // ...
+}
+```
+
+`['status' => 'paused']` is not an accepted value and throws `InvalidRequestException`.
+
+### Archiving a price
+
+A price's amount, currency and interval are fixed at creation, so you stop selling one rather than editing it. The price keeps its id and stays readable, because subscriptions renew against it by id. Subscriptions already on it keep renewing at it; what stops is new business. Re-archiving is a no-op, so a retry is safe, and `['active' => true]` puts it back on sale unchanged.
+
+```php
+$archived = $client->prices->update($price['id'], ['active' => false]);
+// $archived['active'] === false
+
+$back = $client->prices->update($price['id'], ['active' => true]);
+// $back['active'] === true, and the amount is exactly what it always was
+```
 
 Plus `BillKit\Webhooks::verifySignature(...)` (static) for inbound webhooks.
 

@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace BillKit\Tests;
 
+use BillKit\Exception\ApiConnectionException;
 use BillKit\RetryPolicy;
 use BillKit\Tests\Support\MockHttpClient;
+use BillKit\Tests\Support\MockNetworkException;
 use BillKit\Transport;
 use Nyholm\Psr7\Factory\Psr17Factory;
 use PHPUnit\Framework\TestCase;
@@ -112,5 +114,41 @@ final class TransportTest extends TestCase
         $this->transport($http)->request('GET', '/v1/things');
 
         self::assertSame('', $http->lastRequest()->getHeaderLine('Content-Type'));
+    }
+
+    public function testConnectionExceptionMessageIsStrippedOfQueryStrings(): void
+    {
+        // Guzzle and friends interpolate the FULL request URI into their
+        // connection-failure messages, which would re-introduce the query
+        // string this SDK is careful never to log — straight into the
+        // caller's exception handler and error tracker.
+        $http = (new MockHttpClient())->stageError(new MockNetworkException(
+            'cURL error 6: Could not resolve host for '
+            . 'https://test.billkit.eu/v1/customers?email=ada@example.com&limit=25 '
+            . '(see https://curl.se/libcurl/c/libcurl-errors.html)',
+        ));
+
+        try {
+            $this->transport($http)->request('GET', '/v1/customers', ['email' => 'ada@example.com']);
+            self::fail('expected an ApiConnectionException');
+        } catch (ApiConnectionException $err) {
+            self::assertStringNotContainsString('ada@example.com', $err->getMessage());
+            self::assertStringNotContainsString('?', $err->getMessage());
+            // Still diagnosable: scheme, host and path survive.
+            self::assertStringContainsString('https://test.billkit.eu/v1/customers', $err->getMessage());
+            self::assertStringContainsString('Could not resolve host', $err->getMessage());
+        }
+    }
+
+    public function testConnectionExceptionMessageWithoutAUrlIsUntouched(): void
+    {
+        $http = (new MockHttpClient())->stageError(new MockNetworkException('Connection timed out after 30000ms'));
+
+        try {
+            $this->transport($http)->request('GET', '/v1/things');
+            self::fail('expected an ApiConnectionException');
+        } catch (ApiConnectionException $err) {
+            self::assertSame('Connection timed out after 30000ms', $err->getMessage());
+        }
     }
 }
