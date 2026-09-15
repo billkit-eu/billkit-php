@@ -66,7 +66,7 @@ final class WebhookEndpoints extends BaseResource
     }
 
     /**
-     * Rotate the signing secret. The new ``whsec_...`` is returned once.
+     * Rotate the signing secret. The new ``bkwhsec_...`` is returned once.
      *
      * @return array<string, mixed>
      */

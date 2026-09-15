@@ -23,7 +23,7 @@ final class TransportTest extends TestCase
         $psr17 = new Psr17Factory();
 
         return new Transport(
-            apiKey: 'sk_test_unit',
+            apiKey: 'bk_test_unit',
             baseUrl: 'https://test.billkit.eu',
             retryPolicy: new RetryPolicy(maxAttempts: 1, initialBackoffMs: 0, backoffMultiplier: 1.0, maxBackoffMs: 0, jitter: 0.0),
             httpClient: $http,
@@ -55,7 +55,7 @@ final class TransportTest extends TestCase
         $http = (new MockHttpClient())->stage(200, ['ok' => true]);
         $psr17 = new Psr17Factory();
         $transport = new Transport(
-            apiKey: 'sk_test_unit',
+            apiKey: 'bk_test_unit',
             baseUrl: 'https://test.billkit.eu/',
             httpClient: $http,
             requestFactory: $psr17,

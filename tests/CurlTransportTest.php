@@ -28,7 +28,7 @@ final class CurlTransportTest extends TestCase
     public function testConnectionFailureMapsToApiConnectionException(): void
     {
         $client = new BillKitClient(
-            apiKey: 'sk_test_unit',
+            apiKey: 'bk_test_unit',
             // Discard/closed port on loopback → immediate ECONNREFUSED,
             // no external network required.
             baseUrl: 'http://127.0.0.1:1',
@@ -42,7 +42,7 @@ final class CurlTransportTest extends TestCase
     public function testPersistentHandleServesSequentialCalls(): void
     {
         $transport = new Transport(
-            apiKey: 'sk_test_unit',
+            apiKey: 'bk_test_unit',
             baseUrl: 'http://127.0.0.1:1',
             retryPolicy: new RetryPolicy(maxAttempts: 1, initialBackoffMs: 0, backoffMultiplier: 1.0, maxBackoffMs: 0, jitter: 0.0),
         );
@@ -62,7 +62,7 @@ final class CurlTransportTest extends TestCase
     public function testCurlRequiredWhenNoClientInjected(): void
     {
         // Sanity: curl-mode construction succeeds when ext-curl is present.
-        $transport = new Transport(apiKey: 'sk_test_unit');
+        $transport = new Transport(apiKey: 'bk_test_unit');
         self::assertInstanceOf(Transport::class, $transport);
     }
 }

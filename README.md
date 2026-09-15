@@ -20,7 +20,7 @@ composer require billkit-eu/billkit-php
 ```php
 use BillKit\BillKitClient;
 
-$client = new BillKitClient('sk_test_...'); // or set BILLKIT_API_KEY
+$client = new BillKitClient('bk_test_...'); // or set BILLKIT_API_KEY
 
 $customer = $client->customers->create([
     'email' => 'ada@example.com',
@@ -81,7 +81,7 @@ use BillKit\BillKitClient;
 use BillKit\RetryPolicy;
 
 $client = new BillKitClient(
-    apiKey: 'sk_test_...',
+    apiKey: 'bk_test_...',
     baseUrl: 'https://api.billkit.eu',          // override for self-hosted
     timeoutMs: 30_000,
     retryPolicy: new RetryPolicy(maxAttempts: 4),
@@ -184,7 +184,7 @@ use GuzzleHttp\Psr7\HttpFactory;
 
 $factory = new HttpFactory();
 $client = new BillKitClient(
-    apiKey: 'sk_test_...',
+    apiKey: 'bk_test_...',
     httpClient: new GuzzleClient(),
     requestFactory: $factory,
     streamFactory: $factory,
@@ -204,7 +204,7 @@ $log = new Logger('billkit');
 $log->pushHandler(new StreamHandler('php://stderr', Logger::DEBUG));
 
 $client = new BillKitClient(
-    apiKey: 'sk_test_...',
+    apiKey: 'bk_test_...',
     logger: $log,
 );
 ```

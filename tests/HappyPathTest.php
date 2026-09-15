@@ -20,7 +20,7 @@ final class HappyPathTest extends BillKitTestCase
         $req = $http->lastRequest();
         self::assertSame('POST', $req->getMethod());
         self::assertSame(self::BASE_URL . '/v1/customers', $this->url($req));
-        self::assertSame('Bearer sk_test_unit', $req->getHeaderLine('Authorization'));
+        self::assertSame('Bearer bk_test_unit', $req->getHeaderLine('Authorization'));
         self::assertStringStartsWith('sdk-', $req->getHeaderLine('Idempotency-Key'));
         self::assertSame('application/json', $req->getHeaderLine('Content-Type'));
         self::assertSame('billkit-php/' . \BillKit\Version::VERSION, $req->getHeaderLine('User-Agent'));

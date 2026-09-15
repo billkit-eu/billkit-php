@@ -37,7 +37,7 @@ abstract class BillKitTestCase extends TestCase
         $psr17 = new Psr17Factory();
 
         return new BillKitClient(
-            apiKey: 'sk_test_unit',
+            apiKey: 'bk_test_unit',
             baseUrl: self::BASE_URL,
             retryPolicy: $retry ?? $this->fastRetry(),
             httpClient: $http,

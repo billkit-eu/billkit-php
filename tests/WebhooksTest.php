@@ -10,7 +10,7 @@ use PHPUnit\Framework\TestCase;
 
 final class WebhooksTest extends TestCase
 {
-    private const SECRET = 'whsec_test_secret';
+    private const SECRET = 'bkwhsec_test_secret';
 
     /** Build the header the server would send for a given body + timestamp. */
     private function signature(string $payload, int $timestamp, string $secret = self::SECRET): string
@@ -55,7 +55,7 @@ final class WebhooksTest extends TestCase
     {
         $now = 1_700_000_000;
         $payload = '{"id":"evt_1"}';
-        $header = $this->signature($payload, $now, 'whsec_other');
+        $header = $this->signature($payload, $now, 'bkwhsec_other');
 
         $this->expectException(WebhookVerificationException::class);
         Webhooks::verifySignature($payload, $header, self::SECRET, now: $now);
@@ -96,7 +96,7 @@ final class WebhooksTest extends TestCase
         $now = 1_700_000_000;
         $payload = '{"id":"evt_1"}';
         $good = hash_hmac('sha256', $now . '.' . $payload, self::SECRET);
-        $bad = hash_hmac('sha256', $now . '.' . $payload, 'whsec_old_rotated_out');
+        $bad = hash_hmac('sha256', $now . '.' . $payload, 'bkwhsec_old_rotated_out');
         $header = "t={$now},v1={$bad},v1={$good}";
 
         $event = Webhooks::verifySignature($payload, $header, self::SECRET, now: $now);
@@ -108,8 +108,8 @@ final class WebhooksTest extends TestCase
     {
         $now = 1_700_000_000;
         $payload = '{"id":"evt_1"}';
-        $bad1 = hash_hmac('sha256', $now . '.' . $payload, 'whsec_wrong_a');
-        $bad2 = hash_hmac('sha256', $now . '.' . $payload, 'whsec_wrong_b');
+        $bad1 = hash_hmac('sha256', $now . '.' . $payload, 'bkwhsec_wrong_a');
+        $bad2 = hash_hmac('sha256', $now . '.' . $payload, 'bkwhsec_wrong_b');
         $header = "t={$now},v1={$bad1},v1={$bad2}";
 
         $this->expectException(WebhookVerificationException::class);
