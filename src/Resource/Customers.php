@@ -44,7 +44,14 @@ final class Customers extends BaseResource
     }
 
     /**
-     * Soft-delete a customer (see {@see self::purge()} for hard GDPR erasure).
+     * Delete a customer. Returns `['id', 'object', 'deleted' => true]`.
+     *
+     * The customer leaves the API: {@see self::retrieve()} 404s and they
+     * drop out of {@see self::all()}, which is why the response is a
+     * marker and not the customer. Their payments, invoices and refunds
+     * are untouched, and so is their personal data — {@see self::purge()}
+     * is the GDPR erasure. Refused while they hold a subscription that
+     * can still charge them.
      *
      * @return array<string, mixed>
      */
@@ -93,8 +100,9 @@ final class Customers extends BaseResource
     }
 
     /**
-     * Hard-purge a customer's PII for GDPR erasure (irreversible; distinct
-     * from {@see self::delete()} soft-delete). The server requires
+     * Hard-purge a customer's PII for GDPR erasure (irreversible;
+     * {@see self::delete()} removes the customer from the API but leaves
+     * their personal data in place). The server requires
      * ``confirmed: true`` as a fat-finger guard; defaulted to ``true``
      * here so callers don't opt in twice.
      *

@@ -44,16 +44,6 @@ final class Coupons extends BaseResource
     }
 
     /**
-     * Delete a coupon.
-     *
-     * @return array<string, mixed>
-     */
-    public function delete(string $id, ?string $idempotencyKey = null): array
-    {
-        return $this->del("/v1/coupons/{$id}", $idempotencyKey);
-    }
-
-    /**
      * Server-side dry-run of a redemption: returns the discount math
      * without atomically claiming the coupon.
      *

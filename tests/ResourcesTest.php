@@ -190,12 +190,289 @@ final class ResourcesTest extends BillKitTestCase
         self::assertStringStartsWith(self::BASE_URL . '/v1/disputes', $this->url($req));
     }
 
-    public function testDeleteUsesDeleteVerb(): void
+    public function testDeleteUsesDeleteVerbAndReturnsAMarker(): void
     {
-        $http = (new MockHttpClient())->stage(200, ['deleted' => true]);
-        $this->makeClient($http)->customers->delete('cus_1');
+        // The customer leaves the API, so the body is a deletion marker
+        // rather than a row nobody can fetch again.
+        $http = (new MockHttpClient())->stage(200, [
+            'id' => 'cus_1',
+            'object' => 'customer',
+            'deleted' => true,
+        ]);
+        $deleted = $this->makeClient($http)->customers->delete('cus_1');
 
         self::assertSame('DELETE', $http->lastRequest()->getMethod());
         self::assertSame(self::BASE_URL . '/v1/customers/cus_1', $this->url($http->lastRequest()));
+        self::assertTrue($deleted['deleted']);
+    }
+
+    /**
+     * The catalogue is retired through its update route. Each of those
+     * used to carry a `delete()`. None of them deleted anything: every
+     * one of those rows stays readable afterwards, which is why they
+     * have to. Customers and webhook endpoints really do leave the API.
+     */
+    public function testDeleteIsOnlyExposedWhereTheObjectLeaves(): void
+    {
+        $client = $this->makeClient(new MockHttpClient());
+        foreach (['prices', 'products', 'coupons', 'taxRates'] as $name) {
+            self::assertFalse(
+                method_exists($client->{$name}, 'delete'),
+                "{$name}->delete() should not exist",
+            );
+            self::assertTrue(method_exists($client->{$name}, 'update'));
+        }
+        self::assertTrue(method_exists($client->customers, 'delete'));
+        // Configuration, not a record of money: a mistyped URL is removed.
+        // Disabling stays beside it as the reversible act.
+        self::assertTrue(method_exists($client->webhookEndpoints, 'delete'));
+        self::assertTrue(method_exists($client->webhookEndpoints, 'update'));
+    }
+
+    public function testDeleteWebhookEndpointSendsDeleteAndLiftsIdempotencyKey(): void
+    {
+        $http = (new MockHttpClient())->stage(200, [
+            'id' => 'we_1',
+            'object' => 'webhook_endpoint',
+            'deleted' => true,
+        ]);
+        $gone = $this->makeClient($http)->webhookEndpoints->delete('we_1', 'drop-1');
+
+        $req = $http->lastRequest();
+        self::assertSame('DELETE', $req->getMethod());
+        self::assertSame(self::BASE_URL . '/v1/webhook_endpoints/we_1', $this->url($req));
+        self::assertSame('drop-1', $req->getHeaderLine('Idempotency-Key'));
+        self::assertTrue($gone['deleted']);
+    }
+
+    public function testCreateUsageRecordPostsBodyAndLiftsIdempotencyKey(): void
+    {
+        $http = (new MockHttpClient())->stage(201, [
+            'id' => 'ur_1',
+            'object' => 'usage_record',
+            'subscription_id' => 'sub_1',
+            'quantity' => 42,
+            'invoice_id' => null,
+        ]);
+        $this->makeClient($http)->subscriptions->createUsageRecord('sub_1', [
+            'quantity' => 42,
+            'occurred_at' => 1700000000,
+            'metadata' => ['source' => 'unit'],
+            'idempotency_key' => 'usage-1',
+        ]);
+
+        $req = $http->lastRequest();
+        self::assertSame('POST', $req->getMethod());
+        self::assertSame(self::BASE_URL . '/v1/subscriptions/sub_1/usage_records', $this->url($req));
+        $body = $this->bodyArray($req);
+        self::assertSame(42, $body['quantity']);
+        self::assertSame(1700000000, $body['occurred_at']);
+        self::assertSame(['source' => 'unit'], $body['metadata']);
+        // The reserved key is lifted into the header, never sent in the body.
+        self::assertArrayNotHasKey('idempotency_key', $body);
+        self::assertSame('usage-1', $req->getHeaderLine('Idempotency-Key'));
+    }
+
+    public function testCreateUsageRecordMinimalBodyOmitsOptionals(): void
+    {
+        $http = (new MockHttpClient())->stage(201, ['id' => 'ur_1', 'object' => 'usage_record']);
+        $this->makeClient($http)->subscriptions->createUsageRecord('sub_1', ['quantity' => 1]);
+
+        $body = $this->bodyArray($http->lastRequest());
+        self::assertSame(['quantity' => 1], $body);
+    }
+
+    public function testListUsageRecordsForwardsInvoiceIdFilter(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['object' => 'list', 'data' => [], 'has_more' => false]);
+        $this->makeClient($http)->subscriptions->listUsageRecords('sub_1', [
+            'invoice_id' => 'pending',
+            'limit' => 25,
+        ]);
+
+        $req = $http->lastRequest();
+        self::assertSame('GET', $req->getMethod());
+        self::assertStringStartsWith(
+            self::BASE_URL . '/v1/subscriptions/sub_1/usage_records',
+            $this->url($req),
+        );
+        parse_str($req->getUri()->getQuery(), $query);
+        self::assertSame('pending', $query['invoice_id']);
+        self::assertSame('25', $query['limit']);
+    }
+
+    public function testAutoPagingUsageRecordsCarriesInvoiceIdOnEveryPage(): void
+    {
+        // The filter used to be dropped, so `'pending'` silently walked
+        // every usage record ever reported — the opposite of the question
+        // the caller asked, and with no error to notice.
+        $http = (new MockHttpClient())
+            ->stage(200, [
+                'object' => 'list',
+                'data' => [['id' => 'ur_1'], ['id' => 'ur_2']],
+                'has_more' => true,
+            ])
+            ->stage(200, [
+                'object' => 'list',
+                'data' => [['id' => 'ur_3']],
+                'has_more' => false,
+            ]);
+
+        $ids = [];
+        foreach (
+            $this->makeClient($http)->subscriptions->autoPagingIteratorUsageRecords(
+                'sub_1',
+                pageSize: 2,
+                invoiceId: 'pending',
+            ) as $record
+        ) {
+            $ids[] = $record['id'];
+        }
+
+        self::assertSame(['ur_1', 'ur_2', 'ur_3'], $ids);
+        self::assertCount(2, $http->requests);
+        foreach ($http->requests as $req) {
+            parse_str($req->getUri()->getQuery(), $query);
+            self::assertSame('pending', $query['invoice_id']);
+            self::assertSame('2', $query['limit']);
+        }
+        // The second page still advances the cursor.
+        parse_str($http->requests[1]->getUri()->getQuery(), $page2);
+        self::assertSame('ur_2', $page2['starting_after']);
+    }
+
+    public function testAutoPagingUsageRecordsOmitsTheFilterWhenNotGiven(): void
+    {
+        $http = (new MockHttpClient())->stage(200, [
+            'object' => 'list',
+            'data' => [],
+            'has_more' => false,
+        ]);
+
+        iterator_to_array(
+            $this->makeClient($http)->subscriptions->autoPagingIteratorUsageRecords('sub_1'),
+        );
+
+        parse_str($http->lastRequest()->getUri()->getQuery(), $query);
+        self::assertArrayNotHasKey('invoice_id', $query);
+    }
+
+    public function testPriceCreateCarriesUsageType(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['id' => 'price_1', 'usage_type' => 'metered']);
+        $this->makeClient($http)->prices->create([
+            'product_id' => 'prod_api',
+            'amount_cents' => 5,
+            'currency' => 'EUR',
+            'interval' => 'month',
+            'usage_type' => 'metered',
+        ]);
+
+        self::assertSame('metered', $this->bodyArray($http->lastRequest())['usage_type']);
+    }
+
+    public function testPriceUpdateArchivesWithThePostVerb(): void
+    {
+        // Archiving leaves the price readable, so the row comes back in
+        // the response and the caller reads `active` off it. It was a
+        // DELETE until the verb was corrected.
+        $http = (new MockHttpClient())->stage(200, ['id' => 'price_1', 'active' => false]);
+        $archived = $this->makeClient($http)->prices->update('price_1', ['active' => false]);
+
+        $req = $http->lastRequest();
+        self::assertSame('POST', $req->getMethod());
+        self::assertSame(self::BASE_URL . '/v1/prices/price_1', $this->url($req));
+        self::assertSame(['active' => false], $this->bodyArray($req));
+        self::assertStringStartsWith('sdk-', $req->getHeaderLine('Idempotency-Key'));
+        self::assertFalse($archived['active']);
+    }
+
+    /**
+     * `active` moves both ways. It decides what new checkouts may buy and
+     * nothing else, so neither direction can change what a past charge was
+     * made under, which is what price immutability actually protects.
+     */
+    public function testPriceUpdatePutsAPriceBackOnSale(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['id' => 'price_1', 'active' => true]);
+        $back = $this->makeClient($http)->prices->update('price_1', ['active' => true]);
+
+        self::assertSame(['active' => true], $this->bodyArray($http->lastRequest()));
+        self::assertTrue($back['active']);
+    }
+
+    public function testPriceUpdateHonoursAnExplicitIdempotencyKey(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['id' => 'price_1', 'active' => false]);
+        $this->makeClient($http)->prices->update('price_1', [
+            'active' => false,
+            'idempotency_key' => 'archive-1',
+        ]);
+
+        self::assertSame('archive-1', $http->lastRequest()->getHeaderLine('Idempotency-Key'));
+    }
+
+    public function testSubscriptionListForwardsRenewalStateFilter(): void
+    {
+        // `renewal_state=paused` is the only way to find paused rows:
+        // pausing leaves `status` at `active`, and `status=paused` is
+        // rejected by the API.
+        $http = (new MockHttpClient())->stage(200, ['object' => 'list', 'data' => [], 'has_more' => false]);
+        $this->makeClient($http)->subscriptions->all(['renewal_state' => 'paused']);
+
+        $req = $http->lastRequest();
+        self::assertSame('GET', $req->getMethod());
+        parse_str($req->getUri()->getQuery(), $query);
+        self::assertSame('paused', $query['renewal_state']);
+        self::assertArrayNotHasKey('status', $query);
+    }
+
+    public function testSubscriptionListForwardsCustomerAndCsvStatus(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['object' => 'list', 'data' => [], 'has_more' => false]);
+        $this->makeClient($http)->subscriptions->all([
+            'customer_id' => 'cus_1',
+            'status' => 'active,past_due',
+            'limit' => 25,
+        ]);
+
+        parse_str($http->lastRequest()->getUri()->getQuery(), $query);
+        self::assertSame('cus_1', $query['customer_id']);
+        self::assertSame('active,past_due', $query['status']);
+        self::assertSame('25', $query['limit']);
+    }
+
+    public function testAutoPagingSubscriptionsCarriesTheFilterOnEveryPage(): void
+    {
+        $http = (new MockHttpClient())
+            ->stage(200, [
+                'object' => 'list',
+                'data' => [['id' => 'sub_1']],
+                'has_more' => true,
+            ])
+            ->stage(200, [
+                'object' => 'list',
+                'data' => [['id' => 'sub_2']],
+                'has_more' => false,
+            ]);
+
+        $ids = [];
+        foreach (
+            $this->makeClient($http)->subscriptions->autoPagingIterator(
+                pageSize: 1,
+                filters: ['renewal_state' => 'paused'],
+            ) as $sub
+        ) {
+            $ids[] = $sub['id'];
+        }
+
+        self::assertSame(['sub_1', 'sub_2'], $ids);
+        self::assertCount(2, $http->requests);
+        foreach ($http->requests as $req) {
+            parse_str($req->getUri()->getQuery(), $query);
+            self::assertSame('paused', $query['renewal_state']);
+        }
+        parse_str($http->requests[1]->getUri()->getQuery(), $page2);
+        self::assertSame('sub_1', $page2['starting_after']);
     }
 }

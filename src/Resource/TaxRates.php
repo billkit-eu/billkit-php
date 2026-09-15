@@ -44,16 +44,6 @@ final class TaxRates extends BaseResource
     }
 
     /**
-     * Archive a tax rate.
-     *
-     * @return array<string, mixed>
-     */
-    public function delete(string $id, ?string $idempotencyKey = null): array
-    {
-        return $this->del("/v1/tax_rates/{$id}", $idempotencyKey);
-    }
-
-    /**
      * List one page of tax rates. Use {@see self::autoPagingIterator()} to
      * walk every page.
      *

@@ -34,6 +34,11 @@ final class WebhookEndpoints extends BaseResource
     /**
      * Patch mutable fields (url, enabled events, status) on an endpoint.
      *
+     * `['status' => 'disabled']` stops delivery and keeps the endpoint,
+     * its signing secret and its delivery history; `'enabled'` resumes.
+     * Use {@see self::delete()} when the endpoint should not exist at
+     * all: disabling is reversible and deleting is not.
+     *
      * @param array<string, mixed> $params
      *
      * @return array<string, mixed>
@@ -44,7 +49,14 @@ final class WebhookEndpoints extends BaseResource
     }
 
     /**
-     * Delete a webhook endpoint.
+     * Delete an endpoint. Returns `['id', 'object', 'deleted' => true]`.
+     *
+     * A URL registered by mistake should not be a permanent fixture of
+     * the account, so this removes it: {@see self::retrieve()} 404s
+     * afterwards and it is gone from {@see self::all()}. Its delivery
+     * attempts go with it, because they are readable only through the
+     * endpoint that owns them. The events themselves are untouched, so
+     * what you were sent stays on record.
      *
      * @return array<string, mixed>
      */
