@@ -235,8 +235,9 @@ page) and `autoPagingIterator()` (walk all pages).
 | `prices` | create, retrieve, update (archive with `['active' => false]`), all, autoPagingIterator |
 | `checkoutSessions` | create, retrieve |
 | `oneShotPayments` | create, retrieve |
-| `subscriptions` | retrieve, all, autoPagingIterator (filter by `customer_id`, `status`, `renewal_state`), cancel, pause, resume, reactivate, previewUpdate, update, reauthorizePaymentMethod |
+| `subscriptions` | retrieve, all, autoPagingIterator (filter by `customer_id`, `status`, `renewal_state`), cancel, pause, resume, reactivate, previewUpdate, update, reauthorizePaymentMethod, createUsageRecord, listUsageRecords, autoPagingIteratorUsageRecords, retrieveUsageSummary |
 | `refunds` | create, retrieve, all, autoPagingIterator |
+| `disputes` | retrieve, all, autoPagingIterator |
 | `webhookEndpoints` | create, retrieve, update (retire with `['status' => 'disabled']`), rotateSecret, all, autoPagingIterator, allDeliveries, autoPagingIteratorDeliveries, retrieveDelivery, redeliver |
 | `events` | retrieve, all, autoPagingIterator |
 | `tenant` | capabilities, portalBranding, setPortalBranding, rotateProviderCredential |
@@ -286,6 +287,72 @@ foreach ($client->subscriptions->autoPagingIterator(100, ['status' => 'active,pa
 ```
 
 `['status' => 'paused']` is not an accepted value and throws `InvalidRequestException`.
+
+### Metered billing
+
+A metered price charges for what was consumed. You report usage; at each period close BillKit invoices the period's total and charges the stored mandate.
+
+There are three ways to price a unit, and a price uses exactly one of them.
+
+```php
+// 1. Whole minor units: 5 cents per unit.
+$client->prices->create([
+    'product_id' => $product['id'], 'amount_cents' => 5,
+    'currency' => 'EUR', 'interval' => 'month', 'usage_type' => 'metered',
+]);
+
+// 2. Finer than a minor unit. '0.02' is 0.02 CENTS, i.e. EUR 0.0002 per unit:
+//    the canonical per-API-call price, which no integer can express.
+$client->prices->create([
+    'product_id' => $product['id'], 'unit_amount_decimal' => '0.02',
+    'currency' => 'EUR', 'interval' => 'month', 'usage_type' => 'metered',
+]);
+
+// 3. By bands. 'graduated' prices the units inside each band; 'volume' lets
+//    the period total pick one band which then prices every unit. The same
+//    table under the two modes is a different bill, so the mode is required.
+$client->prices->create([
+    'product_id' => $product['id'], 'currency' => 'EUR', 'interval' => 'month',
+    'usage_type' => 'metered', 'billing_scheme' => 'tiered', 'tiers_mode' => 'graduated',
+    'tiers' => [
+        ['up_to' => 1000, 'unit_amount' => 1],               // first 1,000 at EUR 0.01
+        ['up_to' => 'inf', 'unit_amount_decimal' => '0.5'],  // then EUR 0.005
+    ],
+]);
+```
+
+Send none of the three and the server refuses the price.
+
+**`unit_amount_decimal` is a string, and a `float` throws.** PHP has no decimal type, so this is the client where the mistake is easiest to make: `'unit_amount_decimal' => 0.0002` is valid PHP, and `json_encode` would put a JSON *number* on the wire. A float raises `\InvalidArgumentException` before the request is sent, at the price level and inside every band. It is not coerced, because coercing would work for the rates that happen to round-trip through a double and silently mis-price the ones that do not. An `int` is accepted and stringified — an integer is exact, so only the float is a lie.
+
+The rate is in **minor units**, so `'0.02'` is two hundredths of a cent, not two cents. The period's whole quantity is multiplied by the rate and rounded once, at the invoice, so a sub-cent rate loses nothing per record.
+
+The last band must be `'up_to' => 'inf'`, because a bounded top band cannot price the usage above it. Write a free band as `'unit_amount' => 0`. Metered prices must use `'interval' => 'month'`, cannot have `trial_days`, and cannot set `refund_on_cancel`.
+
+#### Reporting usage exactly once
+
+```php
+$client->subscriptions->createUsageRecord($sub['id'], [
+    'quantity' => 1200,
+    'identifier' => 'job-2026-09-19T10:00Z', // your id for what you are metering
+]);
+```
+
+Two dedupe mechanisms, and they cover different failures. `idempotency_key` covers a retry of *that HTTP request*. `identifier` covers a retry of *your* call — a job runner replaying a task, a queue delivering twice, your code re-invoking after its own timeout — which reaches the API as a genuinely new request with a new key. A second report of the same identifier returns the first record unchanged rather than billing twice. If your reporting pipeline is at-least-once, `identifier` is the one that matters.
+
+Records are immutable once written: they are the audit trail behind an invoice line, so there is no update or delete.
+
+#### Knowing what the next invoice will be
+
+```php
+$summary = $client->subscriptions->retrieveUsageSummary($sub['id']);
+$summary['pending_quantity'];     // 3
+$summary['gross_cents'];          // 15
+$summary['will_charge'];          // false
+$summary['minimum_charge_cents']; // 100
+```
+
+Check `will_charge` before you promise a customer an amount. A period whose total is under `minimum_charge_cents` (EUR 1.00) is **not** charged, because the payment provider would refuse it. The usage is not lost: it stays pending and rolls into the next period, which is then billed for both. `net_cents` / `tax_cents` / `gross_cents` are computed through the same rate or tier table and the same VAT resolution the close itself uses, so this is a forecast of the real invoice rather than an estimate. `open_invoice_id` names an earlier cycle that is invoiced and still unsettled; while one is open, this period cannot be charged.
 
 ### Archiving a price
 
