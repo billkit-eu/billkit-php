@@ -475,4 +475,191 @@ final class ResourcesTest extends BillKitTestCase
         parse_str($http->requests[1]->getUri()->getQuery(), $page2);
         self::assertSame('sub_1', $page2['starting_after']);
     }
+
+    // ─── Metered pricing: sub-cent rates, tiers, dedupe, summary ─────
+    //
+    // PHP has no decimal type, which makes it the SDK where the float
+    // mistake is easiest to make, so the rate assertions look at the raw
+    // JSON rather than the decoded body.
+
+    public function testPriceCreateSendsUnitAmountDecimalAsAJsonString(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['id' => 'price_1', 'unit_amount_decimal' => '0.02']);
+        $this->makeClient($http)->prices->create([
+            'product_id' => 'prod_api',
+            'currency' => 'EUR',
+            'interval' => 'month',
+            'usage_type' => 'metered',
+            'unit_amount_decimal' => '0.02',
+        ]);
+
+        $req = $http->lastRequest();
+        // Asserted on the raw bytes: the risk is exactly that the rate
+        // travels as a JSON number, which a reader would parse into a
+        // double that is not 0.02.
+        self::assertStringContainsString('"unit_amount_decimal":"0.02"', (string) $req->getBody());
+        $body = $this->bodyArray($req);
+        self::assertSame('0.02', $body['unit_amount_decimal']);
+        // A price priced by the decimal sends no integer amount at all.
+        self::assertArrayNotHasKey('amount_cents', $body);
+    }
+
+    public function testPriceCreateRefusesAFloatRate(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['id' => 'price_1']);
+        $client = $this->makeClient($http);
+
+        try {
+            $client->prices->create([
+                'product_id' => 'prod_api',
+                'currency' => 'EUR',
+                'interval' => 'month',
+                'usage_type' => 'metered',
+                'unit_amount_decimal' => 0.0002,
+            ]);
+            self::fail('a float rate must not reach the wire');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('unit_amount_decimal', $e->getMessage());
+            self::assertStringContainsString('float', $e->getMessage());
+        }
+
+        // Refused before any HTTP call, not after one.
+        self::assertSame([], $http->requests);
+    }
+
+    public function testPriceCreateStringifiesAnIntegerRate(): void
+    {
+        // An int is exact, so it cannot corrupt anything. Only the float is
+        // a lie, and the wire still has to carry a string.
+        $http = (new MockHttpClient())->stage(200, ['id' => 'price_1']);
+        $this->makeClient($http)->prices->create([
+            'product_id' => 'prod_api',
+            'currency' => 'EUR',
+            'interval' => 'month',
+            'usage_type' => 'metered',
+            'unit_amount_decimal' => 1,
+        ]);
+
+        self::assertStringContainsString(
+            '"unit_amount_decimal":"1"',
+            (string) $http->lastRequest()->getBody(),
+        );
+    }
+
+    public function testPriceCreateSendsATierTable(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['id' => 'price_1']);
+        $this->makeClient($http)->prices->create([
+            'product_id' => 'prod_api',
+            'currency' => 'EUR',
+            'interval' => 'month',
+            'usage_type' => 'metered',
+            'billing_scheme' => 'tiered',
+            'tiers_mode' => 'graduated',
+            'tiers' => [
+                ['up_to' => 1000, 'unit_amount' => 1],
+                ['up_to' => 'inf', 'unit_amount_decimal' => '0.5', 'flat_amount' => 500],
+            ],
+        ]);
+
+        $body = $this->bodyArray($http->lastRequest());
+        self::assertSame('tiered', $body['billing_scheme']);
+        self::assertSame('graduated', $body['tiers_mode']);
+        self::assertSame([
+            ['up_to' => 1000, 'unit_amount' => 1],
+            ['up_to' => 'inf', 'unit_amount_decimal' => '0.5', 'flat_amount' => 500],
+        ], $body['tiers']);
+    }
+
+    public function testPriceCreateRefusesAFloatInsideATier(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['id' => 'price_1']);
+
+        try {
+            $this->makeClient($http)->prices->create([
+                'product_id' => 'prod_api',
+                'currency' => 'EUR',
+                'interval' => 'month',
+                'usage_type' => 'metered',
+                'billing_scheme' => 'tiered',
+                'tiers_mode' => 'graduated',
+                'tiers' => [['up_to' => 'inf', 'unit_amount_decimal' => 0.5]],
+            ]);
+            self::fail('a float rate inside a tier must not reach the wire');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('tiers[0].unit_amount_decimal', $e->getMessage());
+        }
+
+        self::assertSame([], $http->requests);
+    }
+
+    public function testTierIntegerRateIsStringifiedOnTheWire(): void
+    {
+        // Same rule one level down: the band's rate reaches the API as a
+        // string even when it was written as an exact integer.
+        $http = (new MockHttpClient())->stage(200, ['id' => 'price_1']);
+        $this->makeClient($http)->prices->create([
+            'product_id' => 'prod_api',
+            'currency' => 'EUR',
+            'interval' => 'month',
+            'usage_type' => 'metered',
+            'billing_scheme' => 'tiered',
+            'tiers_mode' => 'volume',
+            'tiers' => [['up_to' => 'inf', 'unit_amount_decimal' => 1]],
+        ]);
+
+        self::assertStringContainsString(
+            '"unit_amount_decimal":"1"',
+            (string) $http->lastRequest()->getBody(),
+        );
+    }
+
+    public function testPriceCreateCarriesRefundOnCancel(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['id' => 'price_1', 'refund_on_cancel' => 'prorated']);
+        $this->makeClient($http)->prices->create([
+            'product_id' => 'prod_1',
+            'amount_cents' => 1499,
+            'currency' => 'EUR',
+            'interval' => 'month',
+            'refund_on_cancel' => 'prorated',
+        ]);
+
+        self::assertSame('prorated', $this->bodyArray($http->lastRequest())['refund_on_cancel']);
+    }
+
+    public function testCreateUsageRecordCarriesTheIdentifier(): void
+    {
+        // The dedupe an Idempotency-Key cannot do: a job runner replaying
+        // its own task sends a NEW request with a NEW key.
+        $http = (new MockHttpClient())->stage(201, ['id' => 'ur_1', 'identifier' => 'job-42']);
+        $this->makeClient($http)->subscriptions->createUsageRecord('sub_1', [
+            'quantity' => 10,
+            'identifier' => 'job-42',
+        ]);
+
+        self::assertSame(
+            ['quantity' => 10, 'identifier' => 'job-42'],
+            $this->bodyArray($http->lastRequest()),
+        );
+    }
+
+    public function testRetrieveUsageSummaryIsGet(): void
+    {
+        $http = (new MockHttpClient())->stage(200, [
+            'object' => 'usage_summary',
+            'pending_quantity' => 3,
+            'gross_cents' => 15,
+            'will_charge' => false,
+            'minimum_charge_cents' => 100,
+        ]);
+        $summary = $this->makeClient($http)->subscriptions->retrieveUsageSummary('sub_1');
+
+        $req = $http->lastRequest();
+        self::assertSame('GET', $req->getMethod());
+        self::assertSame(self::BASE_URL . '/v1/subscriptions/sub_1/usage_summary', $this->url($req));
+        // The point of the endpoint: EUR 0.15 of usage will not be charged
+        // this cycle, and the caller can see that before quoting an amount.
+        self::assertFalse($summary['will_charge']);
+    }
 }

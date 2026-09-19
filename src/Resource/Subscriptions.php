@@ -162,10 +162,22 @@ final class Subscriptions extends BaseResource
      * Only valid when the subscription's price is `usage_type: "metered"`;
      * a licensed subscription is rejected with `400 parameter_invalid`.
      * `$params` carries `quantity` (1..1_000_000, required), optional
-     * `occurred_at` (epoch seconds) and `metadata`, plus the reserved
-     * `idempotency_key` entry. Retrying with the same key returns the
-     * same record instead of double-counting the usage, which is what
-     * makes at-least-once reporting pipelines safe.
+     * `occurred_at` (epoch seconds), `identifier` and `metadata`, plus the
+     * reserved `idempotency_key` entry. Records are immutable once written
+     * — they are the audit trail behind an invoice line — so there is no
+     * update or delete.
+     *
+     * **Two dedupe mechanisms, covering different failures.**
+     * `idempotency_key` covers a retry of *this HTTP request*: sending the
+     * same key returns the same record instead of double-counting.
+     * `identifier` covers a retry of *your own* call — a job runner
+     * replaying a task, a queue delivering twice, your code re-invoking
+     * after its own timeout — which arrives at the API as a genuinely new
+     * request with a new key, so the transport-level key cannot see it. An
+     * identifier is unique within the subscription, and a second report of
+     * the same one returns the first record unchanged rather than billing
+     * twice. If your reporting pipeline is at-least-once, `identifier` is
+     * the one that matters.
      *
      * @param array<string, mixed> $params
      *
@@ -191,6 +203,31 @@ final class Subscriptions extends BaseResource
     public function listUsageRecords(string $id, array $params = []): array
     {
         return $this->get("/v1/subscriptions/{$id}/usage_records", $params);
+    }
+
+    /**
+     * Price the pending usage, before the period close bills it.
+     *
+     * {@see self::listUsageRecords()} with `invoice_id => 'pending'` gives
+     * the quantity; this gives the money. `net_cents` / `tax_cents` /
+     * `gross_cents` are computed through the same rate or tier table and
+     * the same VAT resolution the close itself uses, so it is a forecast of
+     * the real invoice rather than an estimate.
+     *
+     * **Read `will_charge` before promising a customer an amount.** A
+     * period whose total is under `minimum_charge_cents` (EUR 1.00) is not
+     * charged, because the payment provider would refuse it. The usage is
+     * not lost: it stays pending and rolls into the next period, which is
+     * then billed for both.
+     *
+     * `open_invoice_id` names an earlier cycle that is invoiced and still
+     * unsettled; while one is open, this period cannot be charged.
+     *
+     * @return array<string, mixed>
+     */
+    public function retrieveUsageSummary(string $id): array
+    {
+        return $this->get("/v1/subscriptions/{$id}/usage_summary");
     }
 
     /**

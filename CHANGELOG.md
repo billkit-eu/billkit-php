@@ -8,6 +8,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versioning is independent of the Node and Python SDKs; each ships on its own
 cadence.
 
+## [0.3.0]
+
+Brings this client level with `@billkit-eu/sdk` 0.3.0 and `billkit-eu` 0.3.0.
+All three server clients now send byte-identical request bodies for this
+surface.
+
+### Added
+- **Metered pricing below one minor unit.** `$client->prices->create()` accepts
+  `unit_amount_decimal`: a per-unit rate in **minor units** with up to 12
+  decimal places, so `'0.02'` (0.02 cents, i.e. EUR 0.0002 per unit) is finally
+  expressible. `amount_cents` is an integer and could never say it. Metered
+  prices only.
+- **Tiered pricing.** `billing_scheme => 'tiered'` with `tiers` and
+  `tiers_mode`. `'graduated'` prices the units inside each band; `'volume'` lets
+  the period total pick one band which then prices every unit. The same table
+  under the two modes is a different bill, so the mode is required rather than
+  defaulted. The last band must be `'up_to' => 'inf'`.
+- **`identifier` on `createUsageRecord()`**, for the retry an idempotency key
+  cannot catch. The key covers a retry of one HTTP request; `identifier` covers
+  a retry of *your own* call — a job runner replaying a task, a queue delivering
+  twice — which arrives as a genuinely new request with a new key. It is unique
+  within the subscription, and a second report of the same identifier returns
+  the first record unchanged rather than billing twice. If your reporting
+  pipeline is at-least-once, this is the one that matters.
+- **`$client->subscriptions->retrieveUsageSummary($id)`**, the money view of
+  pending usage: `pending_quantity`, `net_cents` / `tax_cents` / `gross_cents`
+  computed through the same rate or tier table the period close uses, and
+  `will_charge`. Read `will_charge` before promising a customer an amount: a
+  period under `minimum_charge_cents` (EUR 1.00) is **not** charged, because the
+  provider would refuse it, and the usage rolls into the next period instead.
+  Previously the only record of that decision was a server log line.
+  `open_invoice_id` names an earlier cycle still unsettled.
+- **`BillKit\DecimalRate`, and a float that cannot get through.** PHP has no
+  decimal type, which makes this the client where the mistake is easiest to
+  make: `'unit_amount_decimal' => 0.0002` is valid PHP and `json_encode` would
+  put a JSON *number* on the wire. A float now throws
+  `\InvalidArgumentException` before the request is sent, at the price level and
+  inside every tier. It is not coerced: coercing would work for the rates that
+  happen to round-trip through a double and silently mis-price the ones that do
+  not. An `int` is accepted and stringified, because an integer is exact — only
+  the float is a lie.
+
+  `refund_on_cancel` is also documented on `prices->create()` for the first
+  time. It has been server-side since the `0066` migration and the client always
+  forwarded it, but nothing here said so.
+
 ## [0.2.1]
 
 ### Changed
