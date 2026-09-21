@@ -62,6 +62,13 @@ final class Transport
     /** Cap on the connection phase; never exceeds the total timeout. */
     private const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 
+    /**
+     * How many storage redirects a document route may take. Both transports
+     * read it so curl and PSR-18 cannot disagree about the limit. One hop is
+     * what S3 actually does; the rest is headroom that still terminates.
+     */
+    private const MAX_REDIRECTS = 5;
+
     private readonly string $baseUrl;
     private readonly RetryPolicy $retryPolicy;
     private readonly LoggerInterface $logger;
@@ -115,6 +122,27 @@ final class Transport
         ?string $idempotencyKey = null,
         array $extraHeaders = [],
     ): array {
+        $raw = $this->perform($method, $path, $query, $body, $idempotencyKey, $extraHeaders);
+
+        return $this->decodeSuccess($raw);
+    }
+
+    /**
+     * The retry loop. Returns the first 2xx response body, or throws.
+     *
+     * @param array<string, scalar|null> $query
+     * @param array<string, mixed>|null  $body
+     * @param array<string, string>      $extraHeaders
+     */
+    private function perform(
+        string $method,
+        string $path,
+        array $query,
+        ?array $body,
+        ?string $idempotencyKey,
+        array $extraHeaders,
+        bool $followRedirects = false,
+    ): string {
         $url = $this->buildUrl($path, $query);
         // Query-free; see logSafeUrl(). Never log $url itself.
         $loggedUrl = $this->logSafeUrl($path);
@@ -146,7 +174,7 @@ final class Transport
             ]);
             $startedAt = microtime(true);
             try {
-                [$status, $respHeaders, $respBody] = $this->send($method, $url, $headers, $encoded);
+                [$status, $respHeaders, $respBody] = $this->send($method, $url, $headers, $encoded, $followRedirects);
             } catch (ApiConnectionException $err) {
                 $lastError = $err;
                 if (!$this->retryPolicy->shouldRetry(null, $attempt)) {
@@ -174,7 +202,7 @@ final class Transport
             ]);
 
             if ($status >= 200 && $status < 300) {
-                return $this->decodeSuccess($respBody);
+                return $respBody;
             }
 
             $errorBody = $this->tryDecode($respBody);
@@ -186,7 +214,12 @@ final class Transport
                 $retryAfterMs === null ? null : $retryAfterMs / 1000,
             );
 
-            if (!$this->retryPolicy->shouldRetry($status, $attempt, $retryAfterMs)) {
+            // ``$error->errorCode`` is what separates a transient
+            // ``409 idempotency_in_progress`` from every other (permanent)
+            // 409; see {@see RetryPolicy::IN_PROGRESS_CODE}. The key on the
+            // wire is unchanged across attempts, so the retry replays rather
+            // than re-charges.
+            if (!$this->retryPolicy->shouldRetry($status, $attempt, $retryAfterMs, $error->errorCode)) {
                 throw $error;
             }
             $lastError = $error;
@@ -207,15 +240,40 @@ final class Transport
     }
 
     /**
+     * Fetch a document route's raw bytes (the invoice + credit-note PDFs).
+     *
+     * Same retry budget, timeout and typed exceptions as {@see self::request()};
+     * only the success-path decoding differs, which is why it shares that loop
+     * rather than carrying a second copy of it.
+     *
+     * Redirects are followed for this call alone. S3-backed deployments answer
+     * ``302`` to a presigned URL while blob-backed ones stream the bytes
+     * inline, and following it is what makes the two storage adapters look
+     * identical from here. The presigned URL carries its own credential and
+     * must not be handed BillKit's API key, so ``CURLOPT_UNRESTRICTED_AUTH``
+     * stays off: curl then drops the ``Authorization`` header on a cross-host
+     * hop. That applies to a header set through ``CURLOPT_HTTPHEADER`` only
+     * from **curl 7.58.0** (CVE-2018-1000007); every PHP 8.1+ runtime is well
+     * past it. An injected PSR-18 client owns its own redirect policy, so the
+     * PSR path resolves the hop itself instead — see {@see self::sendPsr()} —
+     * and that is the path the test suite exercises, because the curl one is
+     * curl's guarantee rather than ours.
+     */
+    public function requestBytes(string $method, string $path): string
+    {
+        return $this->perform($method, $path, [], null, null, [], followRedirects: true);
+    }
+
+    /**
      * @param array<string, string> $headers
      *
      * @return array{0: int, 1: array<string, string>, 2: string} status, lowercased headers, body
      */
-    private function send(string $method, string $url, array $headers, ?string $body): array
+    private function send(string $method, string $url, array $headers, ?string $body, bool $followRedirects = false): array
     {
         return $this->httpClient !== null
-            ? $this->sendPsr($method, $url, $headers, $body)
-            : $this->sendCurl($method, $url, $headers, $body);
+            ? $this->sendPsr($method, $url, $headers, $body, $followRedirects)
+            : $this->sendCurl($method, $url, $headers, $body, $followRedirects);
     }
 
     /**
@@ -223,7 +281,7 @@ final class Transport
      *
      * @return array{0: int, 1: array<string, string>, 2: string}
      */
-    private function sendCurl(string $method, string $url, array $headers, ?string $body): array
+    private function sendCurl(string $method, string $url, array $headers, ?string $body, bool $followRedirects = false): array
     {
         // $url is baseUrl . path and $method is an HTTP verb, so both are
         // always non-empty. Assert it so PHPStan narrows to the
@@ -249,6 +307,13 @@ final class Transport
             // Advertise every encoding curl was built with (gzip/deflate/br)
             // and transparently decompress, which is meaningful for large list pages.
             CURLOPT_ACCEPT_ENCODING => '',
+            // Off by default; on only for the document routes. With
+            // CURLOPT_UNRESTRICTED_AUTH left false, curl drops the
+            // Authorization header on a hop to a different host, so a
+            // presigned storage URL never sees BillKit's API key.
+            CURLOPT_FOLLOWLOCATION => $followRedirects,
+            CURLOPT_UNRESTRICTED_AUTH => false,
+            CURLOPT_MAXREDIRS => self::MAX_REDIRECTS,
             CURLOPT_HTTPHEADER => $this->headerLines($headers),
             CURLOPT_HEADERFUNCTION => static function ($_ch, string $line) use (&$respHeaders): int {
                 $idx = strpos($line, ':');
@@ -300,7 +365,43 @@ final class Transport
      *
      * @return array{0: int, 1: array<string, string>, 2: string}
      */
-    private function sendPsr(string $method, string $url, array $headers, ?string $body): array
+    private function sendPsr(string $method, string $url, array $headers, ?string $body, bool $followRedirects = false): array
+    {
+        for ($hop = 0; ; $hop++) {
+            [$status, $respHeaders, $responseBody] = $this->psrRoundTrip($method, $url, $headers, $body);
+
+            if (!$followRedirects || $status < 300 || $status >= 400 || $hop >= self::MAX_REDIRECTS) {
+                return [$status, $respHeaders, $responseBody];
+            }
+            $location = $respHeaders['location'] ?? '';
+            // Absolute http(s) only. The storage adapters always answer with
+            // one, and resolving a relative target against the API host would
+            // point the hop back at us rather than at the object.
+            if (preg_match('~^https?://~i', $location) !== 1) {
+                return [$status, $respHeaders, $responseBody];
+            }
+
+            // A PSR-18 client's redirect policy is its own: some follow, some
+            // do not, and the ones that do may replay the Authorization header
+            // to the storage host. Resolving the hop here makes the behaviour
+            // identical under every injected client, and the next request
+            // deliberately carries no credential of ours — the presigned URL
+            // has its own.
+            unset($headers['Authorization']);
+            $method = 'GET';
+            $url = $location;
+            $body = null;
+        }
+    }
+
+    /**
+     * One PSR-18 request/response, normalised to the shape send() returns.
+     *
+     * @param array<string, string> $headers
+     *
+     * @return array{0: int, 1: array<string, string>, 2: string}
+     */
+    private function psrRoundTrip(string $method, string $url, array $headers, ?string $body): array
     {
         $client = $this->httpClient;
         $requestFactory = $this->requestFactory;

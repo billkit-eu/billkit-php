@@ -10,6 +10,7 @@ use BillKit\Exception\ConflictException;
 use BillKit\Exception\InvalidRequestException;
 use BillKit\Exception\PermissionException;
 use BillKit\Exception\ResourceMissingException;
+use BillKit\Exception\ServerException;
 use BillKit\Exception\WebhookVerificationException;
 use BillKit\Webhooks;
 use PHPUnit\Framework\TestCase;
@@ -51,12 +52,15 @@ final class IntegrationTest extends TestCase
         'crud.price_tiered',
         'crud.credit_note_absent_until_refunded',
         'filters.subscription_renewal_state',
+        'filters.customer_provisional',
         'pagination.has_more',
         'pagination.auto_iter',
         'idempotency.replay',
         'idempotency.key_reuse_conflict',
+        'idempotency.in_progress_converges',
         'errors.not_found',
         'errors.invalid_request',
+        'errors.status_drives_class',
         'money.checkout_to_active',
         'money.partial_refund',
         'money.over_refund_rejected',
@@ -490,6 +494,31 @@ final class IntegrationTest extends TestCase
         }
     }
 
+    /**
+     * A checkout that captures an email commits its Customer *before* the
+     * charge, so a checkout nobody finished leaves a row behind.
+     * `provisional` is the only thing that tells the two apart, and a
+     * fresh tenant is what makes the assertion exact.
+     */
+    public function testFiltersCustomerProvisional(): void
+    {
+        $t = IntegrationHarness::provisionTenant('provisional');
+        $c = new BillKitClient($t['api_key'], IntegrationHarness::baseUrl());
+        $created = $c->customers->create(['email' => 'buyer-' . IntegrationHarness::idemKey() . '@example.com']);
+
+        $ids = static fn (array $params): array => array_column(
+            $c->customers->all($params + ['limit' => 100])['data'],
+            'id',
+        );
+
+        self::assertContains($created['id'], $ids(['provisional' => false]));
+        self::assertNotContains($created['id'], $ids(['provisional' => true]));
+        // Omitted means both kinds, which is why the filter has to be
+        // reachable at all: the default answer is not the one a "list my
+        // customers" screen wants.
+        self::assertContains($created['id'], $ids([]));
+    }
+
     // ── pagination ───────────────────────────────────────────────────
 
     public function testPaginationHasMore(): void
@@ -549,6 +578,54 @@ final class IntegrationTest extends TestCase
         $c->products->create(['name' => 'Different Body', 'idempotency_key' => $key]);
     }
 
+    /**
+     * The contract a caller depends on: firing the same keyed create from
+     * several workers yields ONE resource and no exception.
+     *
+     * A request that arrives while another holder of the key is still
+     * running gets `409 idempotency_in_progress` — the one 4xx the client
+     * retries, because the charge may already have happened and the obvious
+     * workaround (retry with a fresh key) is what turns one charge into two.
+     *
+     * PHP has no in-process concurrency, so the racers are raw curl handles
+     * pumped until their request bodies are on the wire and only drained
+     * afterwards; the SDK's own create runs in between. Whether it lands
+     * inside the server's in-flight window is the server's timing to decide,
+     * so this can pass without entering it; what it can never do is pass
+     * while the client treats that 409 as terminal. The deterministic proof
+     * is in `tests/RetryTest.php`.
+     */
+    public function testIdempotencyInProgressConverges(): void
+    {
+        $t = IntegrationHarness::provisionTenant('inflight');
+        $c = new BillKitClient($t['api_key'], IntegrationHarness::baseUrl());
+        $key = IntegrationHarness::idemKey();
+        $name = 'Concurrent ' . $key;
+
+        [$viaSdk, $racers] = IntegrationHarness::raceJson(
+            '/v1/products',
+            ['name' => $name],
+            ['Authorization' => 'Bearer ' . $t['api_key'], 'Idempotency-Key' => $key],
+            6,
+            static fn (): array => $c->products->create(['name' => $name, 'idempotency_key' => $key]),
+        );
+
+        /** @var array{id: string} $viaSdk */
+        foreach ($racers as [$status, $body]) {
+            self::assertSame(200, $status, "racer answered {$status}: {$body}");
+            /** @var array{id: string} $decoded */
+            $decoded = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
+            self::assertSame($viaSdk['id'], $decoded['id'], 'every attempt must resolve to the same product');
+        }
+
+        // And the server really did create only one row.
+        $rows = array_filter(
+            $c->products->all(['limit' => 100])['data'],
+            static fn (array $row): bool => $row['name'] === $name,
+        );
+        self::assertCount(1, $rows);
+    }
+
     // ── errors ───────────────────────────────────────────────────────
 
     public function testErrorsNotFound(): void
@@ -575,6 +652,32 @@ final class IntegrationTest extends TestCase
         } catch (InvalidRequestException $e) {
             self::assertSame('currency', $e->param);
             self::assertSame('parameter_invalid', $e->errorCode);
+        }
+    }
+
+    /**
+     * Not a contrived body: every request that never reaches a route handler
+     * is serialised by the API's framework-level handler as
+     * `{"type": "api_error", "code": "unhandled"}` with the original 4xx
+     * status. Mapping on `type` made a plain 404 — a typo'd id, an SDK/API
+     * version skew — arrive as `ServerException`, which is the class retry
+     * and alerting policies key on.
+     *
+     * Driven through the transport rather than a resource because that is
+     * what a version skew looks like: the SDK asking for a route this API
+     * does not have.
+     */
+    public function testErrorsStatusDrivesClass(): void
+    {
+        try {
+            $this->client()->transport->request('GET', '/v1/no_such_resource');
+            self::fail('expected ResourceMissingException');
+        } catch (ResourceMissingException $e) {
+            self::assertNotInstanceOf(ServerException::class, $e);
+            // The envelope value is still carried verbatim; it just does not
+            // choose the class.
+            self::assertSame('api_error', $e->errorType);
+            self::assertSame(404, $e->statusCode);
         }
     }
 

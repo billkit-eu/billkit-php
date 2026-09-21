@@ -207,6 +207,114 @@ final class IntegrationHarness
         return [$status, $body];
     }
 
+    /**
+     * Run `$whileInFlight` with `$count` identical POSTs genuinely in flight.
+     *
+     * PHP has no in-process concurrency, and one scenario needs it: `409
+     * idempotency_in_progress` exists only while another request carrying the
+     * same key is still running, so the thing under test has to overlap with
+     * something.
+     *
+     * The pump loop is the part that is easy to get wrong. `curl_multi_exec`
+     * is non-blocking, but libcurl only advances a transfer *while it is being
+     * called* — kicking off once and walking away leaves the racers queued
+     * rather than sent, and the overlap never happens. So this pumps until
+     * every handle is connected and its request written, then hands control
+     * back, then drains.
+     *
+     * @param array<string, mixed>  $payload
+     * @param array<string, string> $headers
+     * @param \Closure(): mixed     $whileInFlight
+     *
+     * @return array{0: mixed, 1: list<array{0: int, 1: string}>} the closure's
+     *                                                            result, and [status, body] per racer
+     */
+    public static function raceJson(
+        string $path,
+        array $payload,
+        array $headers,
+        int $count,
+        \Closure $whileInFlight,
+    ): array {
+        $encoded = json_encode($payload, JSON_THROW_ON_ERROR);
+        $lines = ['Content-Type: application/json'];
+        foreach ($headers as $name => $value) {
+            $lines[] = "{$name}: {$value}";
+        }
+
+        $multi = curl_multi_init();
+        $handles = [];
+        for ($i = 0; $i < $count; $i++) {
+            $ch = curl_init(self::baseUrl() . $path);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST => true,
+                CURLOPT_HTTPHEADER => $lines,
+                CURLOPT_POSTFIELDS => $encoded,
+                CURLOPT_TIMEOUT => 30,
+            ]);
+            curl_multi_add_handle($multi, $ch);
+            $handles[] = $ch;
+        }
+
+        // Push the connects and the request bodies out, without waiting for
+        // any response. Bounded so a slow host cannot turn this into a hang:
+        // the scenario degrades to "no overlap", never to a stuck suite.
+        $running = 0;
+        for ($pump = 0; $pump < 10; $pump++) {
+            curl_multi_exec($multi, $running);
+            if ($running === 0) {
+                break;
+            }
+            if (self::allRequestsSent($handles)) {
+                break;
+            }
+            curl_multi_select($multi, 0.02);
+        }
+
+        $result = $whileInFlight();
+
+        do {
+            curl_multi_exec($multi, $running);
+            if ($running > 0) {
+                curl_multi_select($multi, 0.1);
+            }
+        } while ($running > 0);
+
+        $racers = [];
+        foreach ($handles as $ch) {
+            $racers[] = [
+                (int) curl_getinfo($ch, CURLINFO_HTTP_CODE),
+                (string) curl_multi_getcontent($ch),
+            ];
+            curl_multi_remove_handle($multi, $ch);
+            curl_close($ch);
+        }
+        curl_multi_close($multi);
+
+        return [$result, $racers];
+    }
+
+    /**
+     * True once every handle has written its request body.
+     *
+     * `CURLINFO_SIZE_UPLOAD` is the byte counter curl keeps per transfer; it
+     * only moves once the body is on the wire, which is the moment the server
+     * can start holding the idempotency key.
+     *
+     * @param list<\CurlHandle> $handles
+     */
+    private static function allRequestsSent(array $handles): bool
+    {
+        foreach ($handles as $ch) {
+            if ((float) curl_getinfo($ch, CURLINFO_SIZE_UPLOAD) <= 0.0) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     /** @param array<string, mixed> $payload */
     private static function expectOk(string $path, array $payload): void
     {

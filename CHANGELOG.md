@@ -8,6 +8,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versioning is independent of the Node and Python SDKs; each ships on its own
 cadence.
 
+## [0.5.0] - 2026-09-22
+
+### Added
+- **`invoices->retrievePdf($id)` and `creditNotes->retrievePdf($id)`**,
+  returning the rendered document as a raw string. Blob-backed deployments
+  stream the bytes inline and S3-backed ones answer `302` to a presigned URL,
+  which the transport follows: curl drops the `Authorization` header on a
+  cross-host hop (`CURLOPT_UNRESTRICTED_AUTH` stays off) and the PSR-18 path
+  resolves the redirect itself, unauthenticated, so an injected client's own
+  redirect policy cannot leak the API key to storage. Node has had this since
+  0.3.0.
+
+### Fixed
+- **The exception class is now chosen by the HTTP status, not the envelope
+  `type`.** A request that never reaches a route handler is serialised by the
+  API's framework-level handler as `{"type": "api_error"}` *with a 4xx status*,
+  so a plain `404` — a typo'd id, an SDK/API version skew — was thrown as
+  `ServerException`. That told callers BillKit had broken when their own
+  request was at fault, and `ServerException` is the class retry and alerting
+  policies key on. `errorType` still carries the envelope value verbatim. Node
+  already behaved this way; php and python now match.
+- **`409 idempotency_in_progress` is retried.** It means a request carrying the
+  same `Idempotency-Key` is still in flight, so the charge may already have
+  happened; surfacing it immediately invited the one workaround that turns a
+  single charge into two — retrying with a fresh key. The retry reuses the
+  original key, so it either loses the race again or replays the first call's
+  result. Every other 409 still fails fast. `RetryPolicy::shouldRetry()` takes
+  a fourth `?string $errorCode` argument for this; it defaults to `null`.
+
 ## [0.4.0]
 
 ### Added

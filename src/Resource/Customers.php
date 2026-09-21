@@ -61,8 +61,15 @@ final class Customers extends BaseResource
     }
 
     /**
-     * List one page of customers. Use {@see self::autoPagingIterator()} to
-     * walk every page.
+     * List one page of customers, newest first. Use
+     * {@see self::autoPagingIterator()} to walk every page.
+     *
+     * ``provisional`` filters on whether the customer ever completed a
+     * payment. A checkout that captures an email commits its Customer before
+     * the charge, so a checkout nobody finished leaves a row behind: pass
+     * ``false`` for real customers only, ``true`` for the abandoned ones (the
+     * cart-recovery worklist), or omit for both. Abandoned rows are swept
+     * after the tenant's retention window.
      *
      * @param array<string, scalar|null> $params
      *

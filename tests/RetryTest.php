@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BillKit\Tests;
 
 use BillKit\Exception\ApiConnectionException;
+use BillKit\Exception\ConflictException;
 use BillKit\Exception\ServerException;
 use BillKit\Tests\Support\MockHttpClient;
 use BillKit\Tests\Support\MockNetworkException;
@@ -92,5 +93,81 @@ final class RetryTest extends BillKitTestCase
 
         $this->expectException(ServerException::class);
         $client->subscriptions->retrieve('sub_1');
+    }
+
+    /**
+     * The one 4xx worth retrying.
+     *
+     * ``idempotency_in_progress`` says a request carrying this same key is
+     * still running elsewhere, so the charge may already have happened.
+     * Surfacing it invites the caller to retry with a *fresh* key, which is
+     * exactly what turns one charge into two.
+     *
+     * @return array<string, mixed>
+     */
+    private static function conflict(string $code): array
+    {
+        return ['error' => ['type' => 'conflict', 'code' => $code, 'message' => 'in flight']];
+    }
+
+    public function testInProgressConflictIsRetriedThenReplays(): void
+    {
+        $http = (new MockHttpClient())
+            ->stage(409, self::conflict('idempotency_in_progress'))
+            ->stage(200, ['id' => 'cus_1']);
+        $client = $this->makeClient($http);
+
+        $customer = $client->customers->create(['email' => 'a@b.co']);
+
+        self::assertSame('cus_1', $customer['id']);
+        self::assertCount(2, $http->requests);
+        // The whole reason retrying is safe: the second attempt replays
+        // rather than re-charging, and only an unchanged key can do that.
+        self::assertSame(
+            $http->requests[0]->getHeaderLine('Idempotency-Key'),
+            $http->requests[1]->getHeaderLine('Idempotency-Key'),
+        );
+    }
+
+    public function testConflictWithAnyOtherCodeIsNotRetried(): void
+    {
+        $http = (new MockHttpClient())->stage(409, self::conflict('idempotency_key_in_use'));
+        $client = $this->makeClient($http);
+
+        try {
+            $client->customers->create(['email' => 'a@b.co']);
+            self::fail('expected ConflictException');
+        } catch (ConflictException) {
+            self::assertCount(1, $http->requests);
+        }
+    }
+
+    public function testConflictWithoutACodeIsNotRetried(): void
+    {
+        $http = (new MockHttpClient())->stage(409, ['error' => ['type' => 'conflict', 'message' => 'clash']]);
+        $client = $this->makeClient($http);
+
+        try {
+            $client->customers->create(['email' => 'a@b.co']);
+            self::fail('expected ConflictException');
+        } catch (ConflictException) {
+            self::assertCount(1, $http->requests);
+        }
+    }
+
+    public function testInProgressRetriesAreBounded(): void
+    {
+        $http = (new MockHttpClient())
+            ->stage(409, self::conflict('idempotency_in_progress'))
+            ->stage(409, self::conflict('idempotency_in_progress'))
+            ->stage(409, self::conflict('idempotency_in_progress'));
+        $client = $this->makeClient($http);
+
+        try {
+            $client->customers->create(['email' => 'a@b.co']);
+            self::fail('expected ConflictException');
+        } catch (ConflictException) {
+            self::assertCount(3, $http->requests);
+        }
     }
 }

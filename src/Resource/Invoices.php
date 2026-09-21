@@ -26,6 +26,27 @@ final class Invoices extends BaseResource
     }
 
     /**
+     * Download the rendered invoice PDF as raw bytes.
+     *
+     *     file_put_contents('invoice.pdf', $client->invoices->retrievePdf('inv_123'));
+     *
+     * Blob-backed deployments stream the bytes inline; S3-backed ones answer
+     * ``302`` to a presigned URL, which the transport follows under the SDK's
+     * own timeout and retry policy — so both storage adapters look identical
+     * from here, and the API key never travels to the storage host.
+     *
+     * Deployments with ``INVOICE_PDF_ENABLED=false`` never render one and
+     * answer ``501 rendering_pending``, which surfaces as a
+     * {@see \BillKit\Exception\ServerException} whose ``errorCode`` is
+     * ``rendering_pending``; {@see self::retrieve()} still returns the
+     * structured invoice for tenants who render their own.
+     */
+    public function retrievePdf(string $id): string
+    {
+        return $this->transport->requestBytes('GET', "/v1/invoices/{$id}/pdf");
+    }
+
+    /**
      * List one page of invoices. Use {@see self::autoPagingIterator()} to
      * walk every page.
      *

@@ -133,7 +133,16 @@ try {
 Hierarchy: `ApiConnectionException`, `AuthenticationException` (401),
 `PermissionException` (403), `ResourceMissingException` (404),
 `ConflictException` (409), `RateLimitException` (429), `InvalidRequestException`
-(4xx), `ServerException` (5xx), all extending `BillKitException`.
+(other 4xx), `ServerException` (5xx), all extending `BillKitException`.
+
+The class is chosen by **HTTP status**, not by the envelope's `type`. The
+status is the field the API cannot get wrong. Requests that never reach a route
+handler — an unmatched path, a method the route does not allow — are serialised
+by the framework as `{"type": "api_error", "code": "unhandled"}` *with a 4xx
+status*, so mapping on `type` would turn a plain 404 into a `ServerException`
+and tell you BillKit had broken when the request was at fault. The envelope's
+values are still on the thrown object as `errorType`, `errorCode` and `param`
+if you want them.
 
 ## Retries & idempotency
 
@@ -148,6 +157,24 @@ $client->refunds->create([
     'idempotency_key' => 'refund-order-4711',
 ]);
 ```
+
+`409 idempotency_in_progress` is retried too. It means an earlier request
+carrying the same key is still in flight, which is the one 4xx where giving up
+is the dangerous answer: that request may already have charged the customer,
+and the obvious workaround — retry with a *fresh* key — is exactly what turns
+one charge into two. The retry reuses the original key, so it either loses the
+race again or replays the first call's result. Every other 409
+(`idempotency_key_in_use`, a conflicting subscription state) fails immediately,
+because retrying can only repeat it.
+
+## Invoice and credit-note PDFs
+
+```php
+file_put_contents('invoice.pdf', $client->invoices->retrievePdf('inv_123'));
+file_put_contents('credit-note.pdf', $client->creditNotes->retrievePdf('cn_123'));
+```
+
+Returns the raw bytes. S3-backed deployments answer with a redirect to a presigned URL, which the SDK follows under its own timeout and retry policy, so both storage adapters look the same from here — and the API key is never sent to the storage host, because the presigned URL carries its own credential. A deployment with PDF rendering disabled answers `501`, which surfaces as a `ServerException` with `errorCode == "rendering_pending"`; `retrieve()` still gives you the structured document to render yourself.
 
 ## Webhooks
 
@@ -230,7 +257,7 @@ page) and `autoPagingIterator()` (walk all pages).
 
 | `$client->...` | Methods |
 |--------------|---------|
-| `customers` | create, retrieve, update, delete, all, autoPagingIterator, setVatNumber, purge |
+| `customers` | create, retrieve, update, delete, all (filter by `provisional`), autoPagingIterator, setVatNumber, purge |
 | `products` | create, retrieve, update (archive with `['active' => false]`), all, autoPagingIterator |
 | `prices` | create, retrieve, update (archive with `['active' => false]`), all, autoPagingIterator |
 | `checkoutSessions` | create, retrieve |
@@ -243,7 +270,8 @@ page) and `autoPagingIterator()` (walk all pages).
 | `tenant` | capabilities, portalBranding, setPortalBranding, rotateProviderCredential |
 | `coupons` | create, retrieve, update (withdraw with `['active' => false]`), validate, all, autoPagingIterator |
 | `taxRates` | create, retrieve, update (retire with `['active' => false]`), all, autoPagingIterator |
-| `invoices` | retrieve, all, autoPagingIterator |
+| `invoices` | retrieve, retrievePdf, all, autoPagingIterator, void |
+| `creditNotes` | retrieve, retrievePdf, all, autoPagingIterator (filter by `invoice_id`, `customer_id`) |
 | `auditLogs` | retrieve, all, autoPagingIterator |
 | `payments` | retrieve, all, autoPagingIterator |
 | `billingPortalSessions` | create, revoke |

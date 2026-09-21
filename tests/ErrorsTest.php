@@ -160,4 +160,57 @@ final class ErrorsTest extends BillKitTestCase
             self::assertCount(3, $http->requests);
         }
     }
+
+    // ── the status, not the envelope `type`, picks the class ──────────
+    //
+    // A request that never reaches a route handler is serialised by the
+    // API's framework-level handler as `{"type": "api_error", "code":
+    // "unhandled"}` *with the original 4xx status*. Mapping on `type`
+    // turned those into `ServerException` — telling the caller BillKit had
+    // broken when their own request was at fault, and `ServerException` is
+    // the class retry and alerting policies key on. Node and python assert
+    // the same pair.
+
+    public function testNotFoundFromAnUnmatchedRouteIsNotAServerException(): void
+    {
+        $http = (new MockHttpClient())->stage(404, ['error' => [
+            'type' => 'api_error', 'code' => 'unhandled', 'message' => 'Not Found',
+        ]]);
+        $client = $this->makeClient($http);
+
+        try {
+            $client->customers->retrieve('cus_1');
+            self::fail('expected ResourceMissingException');
+        } catch (ResourceMissingException $err) {
+            self::assertNotInstanceOf(ServerException::class, $err);
+            // The envelope value is still carried verbatim; it just does
+            // not choose the class.
+            self::assertSame('api_error', $err->errorType);
+            self::assertSame('unhandled', $err->errorCode);
+        }
+    }
+
+    public function testMethodNotAllowedIsAnInvalidRequest(): void
+    {
+        $http = (new MockHttpClient())->stage(405, ['error' => [
+            'type' => 'api_error', 'code' => 'unhandled', 'message' => 'nope',
+        ]]);
+        $client = $this->makeClient($http);
+
+        $this->expectException(InvalidRequestException::class);
+        $client->customers->retrieve('cus_1');
+    }
+
+    /** The mirror image: the status wins in both directions. */
+    public function testServerErrorCarryingA4xxShapedTypeIsStillAServerException(): void
+    {
+        $http = (new MockHttpClient())
+            ->stage(500, ['error' => ['type' => 'invalid_request_error', 'message' => 'mislabelled']])
+            ->stage(500, ['error' => ['type' => 'invalid_request_error', 'message' => 'mislabelled']])
+            ->stage(500, ['error' => ['type' => 'invalid_request_error', 'message' => 'mislabelled']]);
+        $client = $this->makeClient($http);
+
+        $this->expectException(ServerException::class);
+        $client->customers->retrieve('cus_1');
+    }
 }
