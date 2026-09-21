@@ -8,6 +8,7 @@ use BillKit\Resource\AuditLogs;
 use BillKit\Resource\BillingPortalSessions;
 use BillKit\Resource\CheckoutSessions;
 use BillKit\Resource\Coupons;
+use BillKit\Resource\CreditNotes;
 use BillKit\Resource\Customers;
 use BillKit\Resource\Disputes;
 use BillKit\Resource\Events;
@@ -67,6 +68,7 @@ final class BillKitClient
     public readonly Coupons $coupons;
     public readonly TaxRates $taxRates;
     public readonly Invoices $invoices;
+    public readonly CreditNotes $creditNotes;
     public readonly AuditLogs $auditLogs;
     public readonly Payments $payments;
     public readonly BillingPortalSessions $billingPortalSessions;
@@ -113,6 +115,7 @@ final class BillKitClient
         $this->coupons = new Coupons($this->transport);
         $this->taxRates = new TaxRates($this->transport);
         $this->invoices = new Invoices($this->transport);
+        $this->creditNotes = new CreditNotes($this->transport);
         $this->auditLogs = new AuditLogs($this->transport);
         $this->payments = new Payments($this->transport);
         $this->billingPortalSessions = new BillingPortalSessions($this->transport);

@@ -120,8 +120,20 @@ final class Transport
         $loggedUrl = $this->logSafeUrl($path);
         $idem = $this->autoIdempotencyKey($method, $idempotencyKey);
         $headers = $this->buildHeaders($body !== null, $idem, $extraHeaders);
+        // An EMPTY body array must go out as ``{}``, not ``[]``. PHP cannot
+        // tell an empty map from an empty list, and ``json_encode([])``
+        // picks the list — which the API rejects with "Input should be a
+        // valid dictionary", because no BillKit request body is ever a JSON
+        // array. Reached by any route whose body is entirely optional
+        // (``POST /v1/invoices/{id}/void`` with no ``reason``). Cast only
+        // the EMPTY case: ``JSON_FORCE_OBJECT`` would also rewrite the
+        // nested lists that are genuinely lists (``tiers``,
+        // ``enabled_events``, ``payment_methods``).
         $encoded = $body !== null
-            ? json_encode($body, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
+            ? json_encode(
+                $body === [] ? new \stdClass() : $body,
+                JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE,
+            )
             : null;
 
         $lastError = null;

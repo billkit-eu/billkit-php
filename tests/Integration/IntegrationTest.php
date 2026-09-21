@@ -47,6 +47,9 @@ final class IntegrationTest extends TestCase
         'crud.coupon',
         'crud.tax_rate',
         'crud.webhook_endpoint',
+        'crud.price_decimal_rate',
+        'crud.price_tiered',
+        'crud.credit_note_absent_until_refunded',
         'filters.subscription_renewal_state',
         'pagination.has_more',
         'pagination.auto_iter',
@@ -58,9 +61,13 @@ final class IntegrationTest extends TestCase
         'money.partial_refund',
         'money.over_refund_rejected',
         'money.dispute_opened',
+        'money.credit_note_for_refund',
+        'money.void_refused_on_paid_invoice',
         'usage.record_and_replay',
         'usage.list_reconciliation',
         'usage.non_metered_rejected',
+        'usage.dedupe_identifier',
+        'usage.summary_forecast',
         'webhooks.verify_roundtrip',
         'webhooks.reject_tampered',
         'webhooks.reject_stale',
@@ -383,6 +390,74 @@ final class IntegrationTest extends TestCase
         $c->webhookEndpoints->retrieve((string) $created['id']);
     }
 
+    /**
+     * A 12-dp rate round-trips byte-identical, as a string.
+     *
+     * The one scenario that can silently corrupt money: a PHP `float`
+     * anywhere on the path rounds a per-call rate away, and the resulting
+     * invoice is wrong by orders of magnitude rather than by a cent.
+     */
+    public function testCrudPriceDecimalRate(): void
+    {
+        $c = $this->client();
+        $product = $c->products->create(['name' => 'Metered ' . IntegrationHarness::idemKey()]);
+        $rate = '0.000000000001'; // twelve decimal places, in MINOR units
+        $price = $c->prices->create([
+            'product_id' => $product['id'],
+            'currency' => 'EUR',
+            'interval' => 'month',
+            'usage_type' => 'metered',
+            'unit_amount_decimal' => $rate,
+        ]);
+        self::assertIsString($price['unit_amount_decimal']);
+        self::assertSame($rate, $price['unit_amount_decimal']);
+
+        // The read path is a separate serializer, so assert it separately.
+        $fetched = $c->prices->retrieve((string) $price['id']);
+        self::assertIsString($fetched['unit_amount_decimal']);
+        self::assertSame($rate, $fetched['unit_amount_decimal']);
+    }
+
+    public function testCrudPriceTiered(): void
+    {
+        $c = $this->client();
+        $product = $c->products->create(['name' => 'Tiered ' . IntegrationHarness::idemKey()]);
+        $price = $c->prices->create([
+            'product_id' => $product['id'],
+            'currency' => 'EUR',
+            'interval' => 'month',
+            'usage_type' => 'metered',
+            'billing_scheme' => 'tiered',
+            // Never defaulted: the same table under the two modes is a
+            // different bill, not a rounding difference.
+            'tiers_mode' => 'graduated',
+            'tiers' => [
+                ['up_to' => 1000, 'unit_amount_decimal' => '0.05'],
+                ['up_to' => 'inf', 'unit_amount_decimal' => '0.0125'],
+            ],
+        ]);
+        self::assertSame('tiered', $price['billing_scheme']);
+        self::assertSame('graduated', $price['tiers_mode']);
+        self::assertCount(2, $price['tiers']);
+        foreach ($price['tiers'] as $tier) {
+            self::assertIsString($tier['unit_amount_decimal']);
+        }
+        self::assertSame('0.05', $price['tiers'][0]['unit_amount_decimal']);
+        self::assertSame('0.0125', $price['tiers'][1]['unit_amount_decimal']);
+    }
+
+    public function testCrudCreditNoteAbsentUntilRefunded(): void
+    {
+        $c = $this->client();
+        // There is no `create` on the resource at all — issuance hangs off a
+        // settled refund. Assert the read surface is reachable and honest
+        // about having nothing yet.
+        self::assertSame('list', $c->creditNotes->all(['limit' => 10])['object']);
+
+        $this->expectException(ResourceMissingException::class);
+        $c->creditNotes->retrieve('cn_does_not_exist');
+    }
+
     // ── filters ──────────────────────────────────────────────────────
 
     public function testFiltersSubscriptionRenewalState(): void
@@ -579,6 +654,83 @@ final class IntegrationTest extends TestCase
         );
     }
 
+    public function testMoneyCreditNoteForRefund(): void
+    {
+        $c = $this->client();
+        $price = $this->makePlan($c, 6400)['price'];
+        $result = $this->checkoutToActive($c, (string) $price['id']);
+        $sub = $this->findSubscription($c, (string) $price['id']);
+        $payment = $this->findPayment($c, (string) $sub['id']);
+
+        $invoice = null;
+        foreach ($c->invoices->all(['limit' => 100])['data'] as $row) {
+            if ($row['payment_id'] === $payment['id']) {
+                $invoice = $row;
+                break;
+            }
+        }
+        self::assertNotNull($invoice, 'the settled charge should have produced an invoice');
+
+        $refund = $c->refunds->create([
+            'payment_id' => $payment['id'],
+            'amount_cents' => 6400,
+        ]);
+        // Nothing yet: the refund is pending and may still fail, and a
+        // gapless series cannot un-issue a number.
+        self::assertSame('pending', $refund['status']);
+        self::assertSame([], $c->creditNotes->all(['invoice_id' => $invoice['id']])['data']);
+
+        IntegrationHarness::settleRefundsFor($result['provider_payment_id'], 'refunded');
+        IntegrationHarness::deliverMollieWebhook(
+            $this->tenant()['mollie_route_id'],
+            $result['provider_payment_id'],
+        );
+
+        $notes = $c->creditNotes->all(['invoice_id' => $invoice['id']])['data'];
+        self::assertCount(1, $notes);
+        $note = $notes[0];
+        self::assertSame($invoice['id'], $note['invoice_id']);
+        // Its own series, deliberately distinct from the invoice's: a tax
+        // authority reads the two as different document classes.
+        self::assertStringStartsWith('CN-', (string) $note['number']);
+        self::assertNotSame($invoice['number'], $note['number']);
+        // The identity the whole document rests on.
+        self::assertSame($note['total_cents'], $note['subtotal_cents'] + $note['tax_cents']);
+        self::assertSame(6400, $note['total_cents']);
+
+        $fetched = $c->creditNotes->retrieve((string) $note['id']);
+        self::assertSame($note['id'], $fetched['id']);
+        self::assertSame('credit_note', $fetched['object']);
+    }
+
+    public function testMoneyVoidRefusedOnPaidInvoice(): void
+    {
+        $c = $this->client();
+        $price = $this->makePlan($c, 1900)['price'];
+        $this->checkoutToActive($c, (string) $price['id']);
+        $sub = $this->findSubscription($c, (string) $price['id']);
+
+        $invoice = null;
+        foreach ($c->invoices->all(['limit' => 100])['data'] as $row) {
+            if ($row['subscription_id'] === $sub['id']) {
+                $invoice = $row;
+                break;
+            }
+        }
+        self::assertNotNull($invoice);
+        self::assertSame('paid', $invoice['status']);
+
+        // Not a limitation — the contract. Voiding claims the sale was never
+        // owed, which is false once the money moved; the reversal there is a
+        // credit note.
+        try {
+            $c->invoices->void((string) $invoice['id']);
+            self::fail('voiding a paid invoice should have been refused');
+        } catch (ConflictException $err) {
+            self::assertSame('invoice_not_voidable', $err->errorCode);
+        }
+    }
+
     // ── usage ────────────────────────────────────────────────────────
 
     public function testUsageRecordAndReplay(): void
@@ -646,6 +798,55 @@ final class IntegrationTest extends TestCase
 
         $this->expectException(InvalidRequestException::class);
         $c->subscriptions->createUsageRecord((string) $sub['id'], ['quantity' => 1]);
+    }
+
+    public function testUsageDedupeIdentifier(): void
+    {
+        $c = $this->client();
+        $price = $this->makePlan($c, 7, 'metered')['price'];
+        $sub = $this->activeSubscription($c, (string) $price['id']);
+
+        $identifier = 'job-' . IntegrationHarness::idemKey();
+        $first = $c->subscriptions->createUsageRecord((string) $sub['id'], [
+            'quantity' => 9,
+            'identifier' => $identifier,
+            'idempotency_key' => IntegrationHarness::idemKey(),
+        ]);
+        // A DIFFERENT idempotency key, so the transport-level replay guard
+        // cannot be what dedupes this. Only the natural key can.
+        $second = $c->subscriptions->createUsageRecord((string) $sub['id'], [
+            'quantity' => 9,
+            'identifier' => $identifier,
+            'idempotency_key' => IntegrationHarness::idemKey(),
+        ]);
+        self::assertSame($first['id'], $second['id']);
+
+        $pending = $c->subscriptions->listUsageRecords((string) $sub['id'], [
+            'invoice_id' => 'pending',
+            'limit' => 100,
+        ]);
+        $ids = array_column($pending['data'], 'id');
+        self::assertCount(1, array_keys($ids, $first['id'], true));
+    }
+
+    public function testUsageSummaryForecast(): void
+    {
+        $c = $this->client();
+        $price = $this->makePlan($c, 11, 'metered')['price'];
+        $sub = $this->activeSubscription($c, (string) $price['id']);
+        foreach ([100, 250] as $quantity) {
+            $c->subscriptions->createUsageRecord((string) $sub['id'], ['quantity' => $quantity]);
+        }
+
+        $summary = $c->subscriptions->retrieveUsageSummary((string) $sub['id']);
+        self::assertSame($sub['id'], $summary['subscription_id']);
+        self::assertSame(350, $summary['pending_quantity']);
+        self::assertSame(2, $summary['pending_record_count']);
+        // 350 units at 11 cents. The forecast and the close share one
+        // predicate server-side, so this is the invoice, not an estimate.
+        self::assertSame(3850, $summary['net_cents']);
+        self::assertSame($summary['gross_cents'], $summary['net_cents'] + $summary['tax_cents']);
+        self::assertTrue($summary['will_charge']);
     }
 
     // ── webhooks ─────────────────────────────────────────────────────

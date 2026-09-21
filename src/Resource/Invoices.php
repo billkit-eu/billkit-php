@@ -50,4 +50,29 @@ final class Invoices extends BaseResource
             $pageSize,
         );
     }
+
+    /**
+     * Void an invoice: state that the sale was never owed.
+     *
+     * The invoice keeps its number and stays readable — a gapless series
+     * cannot lose a row — and stops being a receivable. Use it for an
+     * invoice that should not have been issued.
+     *
+     * A **paid** invoice is refused with a {@see \BillKit\Exception\ConflictException}
+     * whose ``code`` is ``invoice_not_voidable``. That is deliberate: once the
+     * money has moved, "never owed" is false, and the document that reverses a
+     * real sale is a credit note — refund the payment and one is issued when
+     * the refund settles.
+     *
+     * Idempotent: voiding an already-void invoice returns it unchanged.
+     *
+     * @param array<string, mixed> $params ``reason`` (audit row only) and
+     *                                     ``idempotency_key``
+     *
+     * @return array<string, mixed>
+     */
+    public function void(string $id, array $params = []): array
+    {
+        return $this->post("/v1/invoices/{$id}/void", $params);
+    }
 }

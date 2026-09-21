@@ -106,6 +106,27 @@ final class IntegrationHarness
         ]);
     }
 
+    /**
+     * Settle every refund the fake holds against one payment.
+     *
+     * Takes the **provider** payment id (`tr_…`, what `settle()` takes), not
+     * BillKit's own `pay_…`. The form a suite can actually reach: BillKit deliberately never
+     * returns `provider_refund_id`, so a spec that booked a refund through
+     * the real route has no handle on the Mollie row it produced. The API
+     * answers 400 rather than succeeding vacuously when the payment has no
+     * fake refunds, so a mis-wired call fails loudly instead of reporting a
+     * settlement that never happened.
+     */
+    public static function settleRefundsFor(
+        string $providerPaymentId,
+        string $status = 'refunded',
+    ): void {
+        self::expectOk('/v1/console/auth/_test/mollie/refund_status', [
+            'payment_id' => $providerPaymentId,
+            'status' => $status,
+        ]);
+    }
+
     /** Open a chargeback on a fake payment (drives the dispute reconciler). */
     public static function chargeback(string $paymentId, string $amountValue, ?string $reason = null): void
     {

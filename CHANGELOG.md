@@ -8,6 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versioning is independent of the Node and Python SDKs; each ships on its own
 cadence.
 
+## [0.4.0]
+
+### Added
+- **`$client->creditNotes`** — `retrieve`, `all` and `autoPagingIterator`. A
+  credit note is the document that reverses an issued invoice; one is created
+  for you when a refund settles, so there is no `create` here. `all` takes
+  `invoice_id` to answer "was this sale credited, and by how much".
+- **`$client->invoices->void($id)`** — records that an invoice was never owed.
+  It keeps its number and stays readable; it just stops being a receivable.
+
+  A **paid** invoice is refused with a `ConflictException` whose `errorCode` is
+  `invoice_not_voidable`. Once the money has moved, "never owed" is not true —
+  refund the payment instead, and a credit note is issued when the refund
+  settles. Voiding twice is a no-op.
+
+### Fixed
+- **An empty request body was sent as `[]` instead of `{}`**, which the API
+  rejects with a 422, "Input should be a valid dictionary or object to extract
+  fields from". PHP cannot tell an empty map from an empty list and
+  `json_encode([])` picks the list.
+
+  This bit real calls, not just new ones: `$client->customers->update($id)`
+  with no fields, any `update()` where every value you passed was `null` (they
+  are stripped before encoding), `update()` given only an `idempotency_key`,
+  and `$client->tenant->setPortalBranding()`. Only the empty case is affected —
+  arrays that are genuinely lists, like `tiers` and `enabled_events`, are
+  unchanged.
+
 ## [0.3.0]
 
 Brings this client level with `@billkit-eu/sdk` 0.3.0 and `billkit-eu` 0.3.0.

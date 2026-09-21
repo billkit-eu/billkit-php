@@ -108,6 +108,37 @@ final class TransportTest extends TestCase
         }
     }
 
+    /**
+     * An empty body must go out as `{}`, never `[]`.
+     *
+     * PHP cannot tell an empty map from an empty list, and `json_encode([])`
+     * picks the list — which the API rejects with "Input should be a valid
+     * dictionary", because no BillKit request body is ever a JSON array.
+     * Reached by any route whose body is entirely optional, which is how it
+     * was found: `POST /v1/invoices/{id}/void` with no `reason`.
+     */
+    public function testEmptyBodySerialisesAsAnObjectNotAnArray(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['ok' => true]);
+        $this->transport($http)->request('POST', '/v1/things', [], []);
+
+        self::assertSame('{}', (string) $http->lastRequest()->getBody());
+    }
+
+    /** ...and a body that genuinely carries a list keeps it a list. */
+    public function testNestedListsAreNotRewrittenAsObjects(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['ok' => true]);
+        $this->transport($http)->request('POST', '/v1/things', [], [
+            'enabled_events' => ['invoice.paid', 'invoice.voided'],
+        ]);
+
+        self::assertSame(
+            '{"enabled_events":["invoice.paid","invoice.voided"]}',
+            (string) $http->lastRequest()->getBody(),
+        );
+    }
+
     public function testGetSendsNoContentTypeHeader(): void
     {
         $http = (new MockHttpClient())->stage(200, ['ok' => true]);
