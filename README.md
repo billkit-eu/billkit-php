@@ -272,7 +272,7 @@ page) and `autoPagingIterator()` (walk all pages).
 | `taxRates` | create, retrieve, update (retire with `['active' => false]`), all, autoPagingIterator |
 | `invoices` | retrieve, retrievePdf, all, autoPagingIterator, void |
 | `creditNotes` | retrieve, retrievePdf, all, autoPagingIterator (filter by `invoice_id`, `customer_id`) |
-| `auditLogs` | retrieve, all, autoPagingIterator |
+| `auditLogs` | retrieve, all, autoPagingIterator (filter by `action` / `resource_type` / `resource_id` / `actor_id`) |
 | `payments` | retrieve, all, autoPagingIterator |
 | `billingPortalSessions` | create, revoke |
 

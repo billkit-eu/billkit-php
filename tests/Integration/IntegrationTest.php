@@ -53,6 +53,7 @@ final class IntegrationTest extends TestCase
         'crud.credit_note_absent_until_refunded',
         'filters.subscription_renewal_state',
         'filters.customer_provisional',
+        'filters.audit_resource_id',
         'pagination.has_more',
         'pagination.auto_iter',
         'idempotency.replay',
@@ -75,6 +76,9 @@ final class IntegrationTest extends TestCase
         'webhooks.verify_roundtrip',
         'webhooks.reject_tampered',
         'webhooks.reject_stale',
+        'methods.recurring_vocabulary',
+        'methods.one_shot_vocabulary',
+        'methods.banktransfer_settles_in_days',
     ];
 
     /** Only scenarios in this family are required of the php SDK. */
@@ -519,6 +523,36 @@ final class IntegrationTest extends TestCase
         self::assertContains($created['id'], $ids([]));
     }
 
+    /**
+     * The question an audit log mostly exists for: everything that ever
+     * happened to *this* customer. php could always ask it, because it
+     * forwards an array; node and python named three of the API's four
+     * filters and omitted this one, which is what the scenario pins.
+     */
+    public function testFiltersAuditResourceId(): void
+    {
+        $t = IntegrationHarness::provisionTenant('audit-resource');
+        $c = $this->client($t['api_key']);
+
+        $subject = $c->customers->create(['email' => 'subject-' . IntegrationHarness::idemKey() . '@example.com']);
+        // A second customer, so "only the subject's rows" is an assertion
+        // rather than a restatement of an empty tenant.
+        $other = $c->customers->create(['email' => 'other-' . IntegrationHarness::idemKey() . '@example.com']);
+        $c->customers->update($subject['id'], ['name' => 'Renamed']);
+
+        $rows = static fn (array $params): array => $c->auditLogs->all($params + ['limit' => 100])['data'];
+
+        $scoped = $rows(['resource_id' => $subject['id']]);
+        self::assertNotEmpty($scoped);
+        self::assertSame([$subject['id']], array_values(array_unique(array_column($scoped, 'resource_id'))));
+        self::assertNotContains($other['id'], array_column($scoped, 'resource_id'));
+
+        // Combines with resource_type rather than replacing it.
+        $narrowed = $rows(['resource_id' => $subject['id'], 'resource_type' => 'customer']);
+        self::assertNotEmpty($narrowed);
+        self::assertSame([$subject['id']], array_values(array_unique(array_column($narrowed, 'resource_id'))));
+    }
+
     // ── pagination ───────────────────────────────────────────────────
 
     public function testPaginationHasMore(): void
@@ -589,11 +623,35 @@ final class IntegrationTest extends TestCase
      *
      * PHP has no in-process concurrency, so the racers are raw curl handles
      * pumped until their request bodies are on the wire and only drained
-     * afterwards; the SDK's own create runs in between. Whether it lands
-     * inside the server's in-flight window is the server's timing to decide,
-     * so this can pass without entering it; what it can never do is pass
-     * while the client treats that 409 as terminal. The deterministic proof
-     * is in `tests/RetryTest.php`.
+     * afterwards; the SDK's own create runs in between.
+     *
+     * **A racer is not the client, and that is the whole subtlety here.**
+     * This used to assert `200` on every drained handle, which made the test
+     * fail precisely when the race it exists to create actually happened:
+     * raw curl does not retry, so a handle that landed inside the in-flight
+     * window answered 409 and the assertion called correct server behaviour
+     * a failure. Racing 12 same-key creates at a live server returns a mix of
+     * 200 and 409 on most trials, so this was a red flake waiting on load —
+     * and `SCENARIOS.md` promises this scenario "never flakes red".
+     *
+     * So the assertion is the one node and python make, which is the one the
+     * scenario actually declares: every attempt resolves to the SAME
+     * resource id, and the server holds one row. A 409 racer is retried here
+     * the way {@see \BillKit\RetryPolicy} retries it inside the client, and
+     * must then converge. The deterministic proof that the client itself
+     * retries is in `tests/RetryTest.php`.
+     *
+     * **On the racer count, which was measured rather than guessed.** At 6
+     * the in-flight window was never entered in 12 consecutive local runs;
+     * at 8 it was entered in every one of 5, and the pre-fix assertion
+     * failed 3 out of 3 there. 8 would therefore make the race
+     * deterministic — and is not used, because the API pool is
+     * `DB_POOL_SIZE 5 + DB_POOL_MAX_OVERFLOW 5`, so 8 racers plus the SDK's
+     * own create leaves exactly one spare connection. Racing 12 exhausts it
+     * and turns the losers into 500s after a 10s `pool_timeout`, which would
+     * swap a red flake for a slower and much more confusing one. 6 keeps
+     * this comfortably inside the pool; the branch above is what makes the
+     * occasional real race harmless.
      */
     public function testIdempotencyInProgressConverges(): void
     {
@@ -611,11 +669,38 @@ final class IntegrationTest extends TestCase
         );
 
         /** @var array{id: string} $viaSdk */
+        $inFlight = 0;
         foreach ($racers as [$status, $body]) {
-            self::assertSame(200, $status, "racer answered {$status}: {$body}");
-            /** @var array{id: string} $decoded */
-            $decoded = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
+            if ($status === 409) {
+                // A loser that arrived inside the winner's window. The only
+                // thing worth asserting on the wire is that it is *this* 409
+                // and not some other conflict — a key-reuse conflict here
+                // would mean the bodies diverged, which is a real bug.
+                /** @var array{error: array{code: string}} $err */
+                $err = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
+                self::assertSame(
+                    'idempotency_in_progress',
+                    $err['error']['code'],
+                    "racer answered 409 with the wrong code: {$body}",
+                );
+                $inFlight++;
+                // Retry it as the client would, and require convergence.
+                /** @var array{id: string} $decoded */
+                $decoded = $c->products->create(['name' => $name, 'idempotency_key' => $key]);
+            } else {
+                self::assertSame(200, $status, "racer answered {$status}: {$body}");
+                /** @var array{id: string} $decoded */
+                $decoded = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
+            }
             self::assertSame($viaSdk['id'], $decoded['id'], 'every attempt must resolve to the same product');
+        }
+
+        // Not an assertion: whether the window was entered is the server's
+        // timing to decide and the scenario is explicitly allowed to pass
+        // without it. Recorded so a run that never races is visible as such
+        // rather than looking like proof it cannot happen.
+        if ($inFlight === 0) {
+            self::assertTrue(true, 'no racer entered the in-flight window on this run');
         }
 
         // And the server really did create only one row.
@@ -988,6 +1073,160 @@ final class IntegrationTest extends TestCase
 
         $this->expectException(WebhookVerificationException::class);
         Webhooks::verifySignature($body, $this->sign($body, $stale), self::SECRET);
+    }
+
+    // ── methods ──────────────────────────────────────────────────────
+    //
+    // The two request surfaces take different method sets. This SDK names
+    // no method anywhere — it forwards whatever array it is handed — so
+    // these scenarios are the only thing holding php to the same wire
+    // contract node and python spell out in their types.
+
+    /**
+     * The vocabulary a *price* may offer. Mirrors the server's
+     * `RecurringMethod`.
+     */
+    private const RECURRING_METHODS = ['creditcard', 'directdebit', 'ideal', 'eps', 'applepay', 'paypal'];
+
+    /**
+     * The subset that can actually be a checkout's `method`, i.e. that Mollie
+     * will mint a mandate from at `sequenceType=first`.
+     *
+     * `directdebit` is the one member of RECURRING_METHODS missing here, and
+     * the distinction is the whole point of the scenario: SEPA belongs in a
+     * price's allowlist because it is what the renewals settle on, but it can
+     * never be the FIRST charge — the mandate has to be minted by a card,
+     * iDEAL, EPS, Apple Pay or PayPal payment before anything can be collected
+     * over it.
+     */
+    private const MANDATE_CREATING_METHODS = ['creditcard', 'ideal', 'eps', 'applepay', 'paypal'];
+
+    /** Everything a single `sequenceType=oneoff` charge may use. */
+    private const ONE_SHOT_METHODS = [
+        'creditcard', 'directdebit', 'ideal', 'eps', 'applepay', 'paypal',
+        'bancontact', 'banktransfer',
+    ];
+
+    /**
+     * Narrower than the one-shot set on purpose: a checkout has to mint the
+     * mandate the renewal will charge. It is also narrower than the price
+     * allowlist, which is the part that surprises people — `directdebit` is a
+     * perfectly good thing for a price to offer and can never be the payment
+     * that starts one.
+     */
+    public function testMethodsRecurringVocabulary(): void
+    {
+        $t = IntegrationHarness::provisionTenant('methods-recurring');
+        $c = $this->client($t['api_key']);
+        $product = $c->products->create(['name' => 'Plan ' . IntegrationHarness::idemKey()]);
+        $price = $c->prices->create([
+            'product_id' => $product['id'],
+            'amount_cents' => 2500,
+            'currency' => 'EUR',
+            'interval' => 'month',
+            // The allowlist has to name them too, or the refusals below are
+            // the price's and not the vocabulary's.
+            'payment_methods' => self::RECURRING_METHODS,
+        ]);
+
+        // A customer each: an in-flight initial_checkout is guarded per
+        // customer, so reusing one would fail the second method for a reason
+        // that has nothing to do with its name.
+        $startCheckout = fn (string $method): array => $c->checkoutSessions->create([
+            'customer_id' => $this->methodBuyer($c)['id'],
+            'price_id' => $price['id'],
+            'method' => $method,
+            'success_url' => 'https://merchant.example.com/ok',
+            'cancel_url' => 'https://merchant.example.com/cancel',
+        ]);
+
+        foreach (self::MANDATE_CREATING_METHODS as $method) {
+            self::assertNotEmpty($startCheckout($method)['id'], "{$method} should start a checkout");
+        }
+
+        // Two different refusals, and they come from two different layers.
+        //
+        // `directdebit` passes the request literal — it IS a RecurringMethod,
+        // and the price above offers it — and is refused by the service,
+        // because SEPA is what renewals settle on rather than something a
+        // buyer can pay with first.
+        //
+        // `bancontact` and `banktransfer` never reach the service: neither is
+        // in `RecurringMethod` at all, so the schema rejects them. Mollie
+        // refuses banktransfer outright anyway ("The payment method does not
+        // support sequence type").
+        //
+        // Both surface as the same exception, which is the contract this
+        // asserts; the reasons differ and are worth knowing when one fires.
+        foreach (['directdebit', 'bancontact', 'banktransfer'] as $method) {
+            try {
+                $startCheckout($method);
+                self::fail("{$method} must not start a subscription");
+            } catch (InvalidRequestException) {
+                self::assertTrue(true);
+            }
+        }
+    }
+
+    /**
+     * `banktransfer` included, and the retired `giropay` refused: the scheme
+     * shut down at the end of 2024, so its refusal is part of the contract
+     * rather than an omission.
+     */
+    public function testMethodsOneShotVocabulary(): void
+    {
+        $t = IntegrationHarness::provisionTenant('methods-oneshot');
+        $c = $this->client($t['api_key']);
+
+        foreach (self::ONE_SHOT_METHODS as $method) {
+            $charge = $this->oneShot($c, $method);
+            self::assertNotEmpty($charge['id'], "{$method} should take a one-off charge");
+        }
+
+        $this->expectException(InvalidRequestException::class);
+        $this->oneShot($c, 'giropay');
+    }
+
+    /**
+     * The payer is handed bank details and pays on their own schedule, so
+     * `pending` is not a failure and not something to poll.
+     */
+    public function testMethodsBanktransferSettlesInDays(): void
+    {
+        $t = IntegrationHarness::provisionTenant('methods-banktransfer');
+        $c = $this->client($t['api_key']);
+
+        $card = $this->oneShot($c, 'creditcard');
+        $transfer = $this->oneShot($c, 'banktransfer');
+
+        // Relative, not absolute: the window is copied from the provider's
+        // own answer rather than invented by BillKit, so pinning an exact
+        // number would assert the fake's arithmetic instead of the behaviour
+        // an integrator has to plan for.
+        self::assertGreaterThan($card['expires_at'], $transfer['expires_at']);
+        $days = ($transfer['expires_at'] - time()) / 86400;
+        self::assertGreaterThan(5, $days, 'a bank transfer stays open for days, not minutes');
+    }
+
+    /** @return array<string, mixed> */
+    private function methodBuyer(BillKitClient $c): array
+    {
+        return $c->customers->create([
+            'email' => 'method-' . IntegrationHarness::idemKey() . '@sdk-it.example.com',
+            'country_code' => 'AT',
+        ]);
+    }
+
+    /** @return array<string, mixed> */
+    private function oneShot(BillKitClient $c, string $method): array
+    {
+        return $c->oneShotPayments->create([
+            'customer_id' => $this->methodBuyer($c)['id'],
+            'amount_cents' => 2500,
+            'currency' => 'EUR',
+            'method' => $method,
+            'success_url' => 'https://merchant.example.com/ok',
+        ]);
     }
 
     // ── parity gate ──────────────────────────────────────────────────

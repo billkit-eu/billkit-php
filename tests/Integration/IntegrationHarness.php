@@ -287,8 +287,10 @@ final class IntegrationHarness
                 (int) curl_getinfo($ch, CURLINFO_HTTP_CODE),
                 (string) curl_multi_getcontent($ch),
             ];
+            // No curl_close(): the handle is freed when the last reference
+            // to it goes, and the function has done nothing since PHP 8.0.
+            // It is deprecated in 8.5, which the CI matrix now covers.
             curl_multi_remove_handle($multi, $ch);
-            curl_close($ch);
         }
         curl_multi_close($multi);
 

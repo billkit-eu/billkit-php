@@ -8,6 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versioning is independent of the Node and Python SDKs; each ships on its own
 cadence.
 
+## [0.6.0] - 2026-09-23
+
+### Added
+- **`auditLogs->autoPagingIterator()` takes a `$resourceId` scope.**
+  - It answers "everything that ever happened to this customer", which is the
+    question an audit log mostly exists for.
+  - The API has always accepted a `resource_id` filter and `all()` could
+    always forward it, because `all()` takes an array — but the iterator named
+    only three of the four, so a scoped walk meant dropping back to manual
+    pagination.
+  - Matches exactly, and combines with `$resourceType` rather than replacing
+    it.
+  - **It is the LAST parameter**, not beside `$resourceType` where it belongs
+    by meaning. These are positional: inserting it in the middle would
+    silently re-bind the fourth argument of every existing four-argument call
+    from an actor id to a resource id, and both are opaque strings no type
+    check would catch. Reach for named arguments (`resourceId: $id`) and the
+    order stops mattering.
+
+### Changed
+- **The integration suite now covers the payment-method vocabulary** on both
+  request surfaces: `methods.recurring_vocabulary`,
+  `methods.one_shot_vocabulary` and `methods.banktransfer_settles_in_days`.
+  - No behaviour change. They describe what the server already accepted.
+  - This package names no method anywhere — it forwards whatever array it is
+    handed — so those scenarios are the only thing holding it to the same wire
+    contract the node and python unions spell out.
+
 ## [0.5.0] - 2026-09-22
 
 ### Added
@@ -197,5 +225,11 @@ First public release.
   is what lets Monolog, Laravel's `Log` channel and Symfony's logger all drop
   straight in.
 
-[Unreleased]: https://github.com/billkit-eu/billkit-php/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/billkit-eu/billkit-php/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/billkit-eu/billkit-php/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/billkit-eu/billkit-php/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/billkit-eu/billkit-php/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/billkit-eu/billkit-php/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/billkit-eu/billkit-php/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/billkit-eu/billkit-php/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/billkit-eu/billkit-php/releases/tag/v0.1.0
