@@ -127,4 +127,17 @@ final class WebhooksTest extends TestCase
 
         self::assertSame('evt_1', $event['id']);
     }
+
+    public function testZeroTimestampIsMalformedNotMerelyStale(): void
+    {
+        // `t=0` would also fail the tolerance window, but naming it as
+        // malformed is the honest answer and is what node says too.
+        $this->expectException(WebhookVerificationException::class);
+        $this->expectExceptionMessage('Malformed timestamp');
+        Webhooks::verifySignature(
+            payload: '{}',
+            signatureHeader: 't=0,v1=' . str_repeat('a', 64),
+            secret: 'bkwhsec_x',
+        );
+    }
 }

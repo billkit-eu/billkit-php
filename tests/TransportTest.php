@@ -182,4 +182,52 @@ final class TransportTest extends TestCase
             self::assertSame('Connection timed out after 30000ms', $err->getMessage());
         }
     }
+
+    public function testConnectionExceptionKeepsTheClientsOwnExceptionAsPrevious(): void
+    {
+        // The message the caller sees is sanitised and generic ("cURL
+        // error 6"), so the original is the only thing left carrying the
+        // rest of the diagnosis. Dropping it threw that away.
+        $cause = new MockNetworkException('cURL error 6: Could not resolve host');
+        $http = (new MockHttpClient())->stageError($cause);
+
+        try {
+            $this->transport($http)->request('GET', '/v1/things');
+            self::fail('expected an ApiConnectionException');
+        } catch (ApiConnectionException $err) {
+            self::assertSame($cause, $err->getPrevious());
+        }
+    }
+
+    public function testAnApiErrorHasNoPrevious(): void
+    {
+        $http = (new MockHttpClient())->stage(404, ['error' => ['type' => 'invalid_request_error']]);
+
+        try {
+            $this->transport($http)->request('GET', '/v1/things/missing');
+            self::fail('expected a BillKitException');
+        } catch (\BillKit\Exception\BillKitException $err) {
+            self::assertNull($err->getPrevious());
+            // ``\Exception::$code`` stays 0; the HTTP status has its own field.
+            self::assertSame(0, $err->getCode());
+            self::assertSame(404, $err->statusCode);
+        }
+    }
+
+    public function testExpandIsJoinedWithCommasInTheQuery(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['object' => 'list', 'data' => [], 'has_more' => false]);
+        $this->transport($http)->request('GET', '/v1/payments', [
+            'expand' => ['customer', 'subscription'],
+            'limit' => 5,
+            // An empty list is nothing to ask for, so it is dropped rather
+            // than sent as `expand=`, which the API rejects.
+            'starting_after' => null,
+        ]);
+
+        self::assertSame(
+            'expand=customer%2Csubscription&limit=5',
+            $http->lastRequest()->getUri()->getQuery(),
+        );
+    }
 }

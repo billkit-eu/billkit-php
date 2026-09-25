@@ -662,4 +662,256 @@ final class ResourcesTest extends BillKitTestCase
         // this cycle, and the caller can see that before quoting an amount.
         self::assertFalse($summary['will_charge']);
     }
+
+    // ── 0.7.0 surface ────────────────────────────────────────────────
+
+    /**
+     * An id is caller data, and one carrying `/`, `?` or `#` must not be
+     * able to rewrite the request onto another route: `#` truncates the
+     * path, `?` turns the tail into a query string, and `/` walks
+     * somewhere else entirely.
+     */
+    public function testPathIdsArePercentEncoded(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['id' => 'x']);
+        $this->makeClient($http)->customers->retrieve('cus_1/../../v1/tenant/export?x=1#frag');
+
+        $req = $http->lastRequest();
+        self::assertSame(
+            self::BASE_URL . '/v1/customers/cus_1%2F..%2F..%2Fv1%2Ftenant%2Fexport%3Fx%3D1%23frag',
+            $this->url($req),
+        );
+        // The route the method names, not the one the id tried to reach.
+        self::assertSame('/v1/customers/cus_1%2F..%2F..%2Fv1%2Ftenant%2Fexport%3Fx%3D1%23frag', $req->getUri()->getPath());
+        self::assertSame('', $req->getUri()->getQuery());
+        self::assertSame('', $req->getUri()->getFragment());
+    }
+
+    public function testEncodedIdStillLandsOnASubRoute(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['id' => 'sub_1']);
+        $this->makeClient($http)->subscriptions->cancel('sub a/b');
+
+        self::assertSame(
+            self::BASE_URL . '/v1/subscriptions/sub%20a%2Fb/cancel',
+            $this->url($http->lastRequest()),
+        );
+    }
+
+    public function testExpandIsSentAsACommaJoinedList(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['object' => 'list', 'data' => [], 'has_more' => false]);
+        $this->makeClient($http)->subscriptions->all(['expand' => ['customer', 'price']]);
+
+        self::assertSame('expand=customer%2Cprice', $http->lastRequest()->getUri()->getQuery());
+    }
+
+    public function testExpandOnRetrieve(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['id' => 'inv_1']);
+        $this->makeClient($http)->invoices->retrieve('inv_1', ['expand' => ['customer']]);
+
+        $req = $http->lastRequest();
+        self::assertSame(self::BASE_URL . '/v1/invoices/inv_1?expand=customer', $this->url($req));
+    }
+
+    /**
+     * The one place a `null` in a params array is a value: clearing the
+     * registration. Stripping it would send an empty body, which the API
+     * reads as "leave it alone".
+     */
+    public function testSetVatNumberSendsAnExplicitNullToClear(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['id' => 'cus_1', 'vat_number' => null]);
+        $this->makeClient($http)->customers->setVatNumber('cus_1', ['vat_number' => null]);
+
+        $req = $http->lastRequest();
+        self::assertSame(self::BASE_URL . '/v1/customers/cus_1/vat_number', $this->url($req));
+        self::assertSame('{"vat_number":null}', (string) $req->getBody());
+    }
+
+    /**
+     * A null is a value here, so an absent key cannot be read as one: a call
+     * carrying only country_code would otherwise clear a registration the
+     * caller never mentioned.
+     */
+    public function testSetVatNumberRefusesAnAbsentKey(): void
+    {
+        $http = new MockHttpClient();
+        $this->expectException(\InvalidArgumentException::class);
+        $this->makeClient($http)->customers->setVatNumber('cus_1', ['country_code' => 'NL']);
+    }
+
+    public function testSetVatNumberDropsANullCountryCode(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['id' => 'cus_1']);
+        $this->makeClient($http)->customers->setVatNumber('cus_1', [
+            'vat_number' => 'NL123456789B01',
+            'country_code' => null,
+        ]);
+
+        self::assertSame(
+            ['vat_number' => 'NL123456789B01'],
+            $this->bodyArray($http->lastRequest()),
+        );
+    }
+
+    public function testPriceUpdateCarriesEveryForwardLookingField(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['id' => 'price_1']);
+        $this->makeClient($http)->prices->update('price_1', [
+            'metadata' => ['tier' => 'pro'],
+            'tax_behavior' => 'exclusive',
+            'payment_methods' => ['creditcard', 'ideal'],
+            'refund_on_cancel' => 'prorated',
+            'refund_window_initial_days' => 14,
+            'refund_window_renewal_days' => 0,
+        ]);
+
+        $body = $this->bodyArray($http->lastRequest());
+        self::assertSame(['tier' => 'pro'], $body['metadata']);
+        self::assertSame('exclusive', $body['tax_behavior']);
+        self::assertSame(['creditcard', 'ideal'], $body['payment_methods']);
+        self::assertSame('prorated', $body['refund_on_cancel']);
+        self::assertSame(14, $body['refund_window_initial_days']);
+        // 0 disables refunds for that charge type, so it must survive the
+        // null-stripping that `false`/`0`/`''` are exempt from.
+        self::assertSame(0, $body['refund_window_renewal_days']);
+        self::assertArrayNotHasKey('active', $body);
+    }
+
+    public function testCheckoutSessionCarriesCountry(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['id' => 'cs_1']);
+        $this->makeClient($http)->checkoutSessions->create([
+            'price_id' => 'price_1',
+            'success_url' => 'https://app.example.com/ok',
+            'cancel_url' => 'https://app.example.com/no',
+            'country' => 'NL',
+        ]);
+
+        self::assertSame('NL', $this->bodyArray($http->lastRequest())['country']);
+    }
+
+    public function testBillingPortalSessionCarriesDeliverEmail(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['url' => 'https://portal.billkit.eu/x']);
+        $this->makeClient($http)->billingPortalSessions->create([
+            'subscription_id' => 'sub_1',
+            'return_url' => 'https://app.example.com/back',
+            'deliver_email' => true,
+        ]);
+
+        $body = $this->bodyArray($http->lastRequest());
+        self::assertTrue($body['deliver_email']);
+        self::assertSame('sub_1', $body['subscription_id']);
+    }
+
+    public function testInvoiceSendEmailPostsAnEmptyBody(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['object' => 'invoice_email', 'sent' => true]);
+        $this->makeClient($http)->invoices->sendEmail('inv_1');
+
+        $req = $http->lastRequest();
+        self::assertSame('POST', $req->getMethod());
+        self::assertSame(self::BASE_URL . '/v1/invoices/inv_1/email', $this->url($req));
+        self::assertSame('', (string) $req->getBody());
+    }
+
+    public function testPaymentProviderPayloadIsGet(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['available' => false, 'reason' => 'provider_unavailable']);
+        $this->makeClient($http)->payments->retrieveProvider('pay_1');
+
+        $req = $http->lastRequest();
+        self::assertSame('GET', $req->getMethod());
+        self::assertSame(self::BASE_URL . '/v1/payments/pay_1/provider', $this->url($req));
+    }
+
+    public function testEventTypesCatalogueIsGet(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['object' => 'list', 'data' => ['*']]);
+        $this->makeClient($http)->webhookEndpoints->listEventTypes();
+
+        $req = $http->lastRequest();
+        self::assertSame('GET', $req->getMethod());
+        self::assertSame(self::BASE_URL . '/v1/webhook_endpoints/event_types', $this->url($req));
+    }
+
+    public function testTenantBillingProfileRoundTrip(): void
+    {
+        $http = (new MockHttpClient())
+            ->stage(200, ['object' => 'tenant_billing_profile', 'country_code' => 'NL'])
+            ->stage(200, ['object' => 'tenant_billing_profile', 'country_code' => 'NL', 'vat_id' => null]);
+        $client = $this->makeClient($http);
+
+        $client->tenant->billingProfile();
+        self::assertSame('GET', $http->lastRequest()->getMethod());
+        self::assertSame(self::BASE_URL . '/v1/tenant/billing_profile', $this->url($http->lastRequest()));
+
+        $client->tenant->setBillingProfile([
+            'country_code' => 'NL',
+            // Present-and-null clears the registration ...
+            'vat_id' => null,
+            'city' => 'Amsterdam',
+            // ... while `postal_code` is absent, so it is left alone.
+        ]);
+        $req = $http->lastRequest();
+        self::assertSame('POST', $req->getMethod());
+        self::assertSame('{"country_code":"NL","vat_id":null,"city":"Amsterdam"}', (string) $req->getBody());
+    }
+
+    public function testTenantExportUsesTheBinaryPath(): void
+    {
+        $http = (new MockHttpClient())->stage(200, '{"billkit_export_version":2}');
+        $raw = $this->makeClient($http)->tenant->export();
+
+        self::assertSame('{"billkit_export_version":2}', $raw);
+        self::assertSame(self::BASE_URL . '/v1/tenant/export', $this->url($http->lastRequest()));
+    }
+
+    public function testApiKeyVerbs(): void
+    {
+        $http = (new MockHttpClient())
+            ->stage(200, ['id' => 'ak_1', 'secret' => 'bk_test_xyz'])
+            ->stage(200, ['id' => 'ak_1', 'prefix' => 'bk_test_xy'])
+            ->stage(200, ['id' => 'ak_1', 'revoked_at' => 1])
+            ->stage(200, ['object' => 'list', 'data' => [], 'has_more' => false]);
+        $client = $this->makeClient($http);
+
+        $client->apiKeys->create(['label' => 'ci', 'scopes' => ['products:read']]);
+        self::assertSame(self::BASE_URL . '/v1/api_keys', $this->url($http->lastRequest()));
+        self::assertSame(
+            ['label' => 'ci', 'scopes' => ['products:read']],
+            $this->bodyArray($http->lastRequest()),
+        );
+
+        $client->apiKeys->retrieve('ak_1');
+        self::assertSame(self::BASE_URL . '/v1/api_keys/ak_1', $this->url($http->lastRequest()));
+
+        $client->apiKeys->revoke('ak_1');
+        $req = $http->lastRequest();
+        self::assertSame('POST', $req->getMethod());
+        self::assertSame(self::BASE_URL . '/v1/api_keys/ak_1/revoke', $this->url($req));
+
+        $client->apiKeys->all(['limit' => 2]);
+        self::assertSame('limit=2', $http->lastRequest()->getUri()->getQuery());
+    }
+
+    public function testListFiltersRideEveryPage(): void
+    {
+        $http = (new MockHttpClient())
+            ->stage(200, ['object' => 'list', 'data' => [['id' => 'dp_1']], 'has_more' => true])
+            ->stage(200, ['object' => 'list', 'data' => [['id' => 'dp_2']], 'has_more' => false]);
+
+        $rows = iterator_to_array(
+            $this->makeClient($http)->disputes->autoPagingIterator(pageSize: 1, status: 'open'),
+        );
+
+        self::assertCount(2, $rows);
+        self::assertSame('status=open&limit=1', $http->requests[0]->getUri()->getQuery());
+        // The filter has to ride the cursor page too, or the walk widens
+        // after the first page.
+        self::assertSame('status=open&limit=1&starting_after=dp_1', $http->requests[1]->getUri()->getQuery());
+    }
 }

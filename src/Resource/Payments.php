@@ -17,18 +17,49 @@ final class Payments extends BaseResource
     /**
      * Fetch a single payment by id.
      *
+     * ``['expand' => ['customer', 'subscription']]`` attaches the buyer and
+     * the subscription this charge belongs to. Those two are the only
+     * relations this route expands.
+     *
+     * @param array<string, scalar|list<string>|null> $params ``expand`` only
+     *
      * @return array<string, mixed>
      */
-    public function retrieve(string $id): array
+    public function retrieve(string $id, array $params = []): array
     {
-        return $this->get("/v1/payments/{$id}");
+        return $this->get('/v1/payments/' . self::p($id), $params);
+    }
+
+    /**
+     * Fetch the provider's own record of this charge, live.
+     *
+     * Reads Mollie at request time rather than a stored copy, so it carries
+     * what BillKit deliberately does not keep: the card BIN, the iDEAL
+     * bank, the provider's own status string. Reading live means it can
+     * fail, and a provider outage or a charge old enough to have aged out
+     * answers ``200`` with ``available: false`` and a short reason rather
+     * than an error, so render the rest of the page regardless.
+     *
+     * @return array<string, mixed>
+     */
+    public function retrieveProvider(string $id): array
+    {
+        return $this->get('/v1/payments/' . self::p($id) . '/provider');
     }
 
     /**
      * List one page of payments. Use {@see self::autoPagingIterator()} to
      * walk every page.
      *
-     * @param array<string, scalar|null> $params
+     * ``customer_id`` narrows to one buyer's charges. Failed and pending
+     * attempts are listed alongside settled ones, so read ``status`` before
+     * treating a row as revenue; mandate verifications are never listed, so
+     * every row is a real purchase attempt. One-off charges are not here.
+     *
+     * ``['expand' => ['customer', 'subscription']]`` is accepted too, and is
+     * resolved for the whole page in one query rather than per row.
+     *
+     * @param array<string, scalar|list<string>|null> $params
      *
      * @return array<string, mixed>
      */
@@ -38,15 +69,19 @@ final class Payments extends BaseResource
     }
 
     /**
-     * Yield every payment across all pages.
+     * Yield every payment across all pages, optionally narrowed to one
+     * customer. The filter is carried onto every page request, so a
+     * filtered walk narrows server-side instead of paging the whole
+     * ledger to find the tail of the match.
      *
      * @return \Generator<int, mixed>
      */
-    public function autoPagingIterator(?int $pageSize = null): \Generator
+    public function autoPagingIterator(?int $pageSize = null, ?string $customerId = null): \Generator
     {
         yield from Collection::autoPagingIterator(
             fn (array $p): array => $this->get('/v1/payments', $p),
             $pageSize,
+            ['customer_id' => $customerId],
         );
     }
 }

@@ -16,14 +16,19 @@ final class Events extends BaseResource
      */
     public function retrieve(string $id): array
     {
-        return $this->get("/v1/events/{$id}");
+        return $this->get('/v1/events/' . self::p($id));
     }
 
     /**
      * List one page of events. Use {@see self::autoPagingIterator()} to
      * walk every page.
      *
-     * @param array<string, scalar|null> $params
+     * ``['expand' => ['customer']]`` names the customer an event is about,
+     * so an activity feed does not render an id nobody can read. It is the
+     * only relation this route expands, and {@see self::retrieve()} accepts
+     * no ``expand`` at all.
+     *
+     * @param array<string, scalar|list<string>|null> $params
      *
      * @return array<string, mixed>
      */

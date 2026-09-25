@@ -32,8 +32,8 @@ final class Collection
      *      otherwise loop forever.
      *   3. The last row has no ``id``, so there is no cursor to advance with.
      *
-     * @param callable(array<string, scalar|null>): array<string, mixed> $listFn
-     * @param array<string, scalar|null>                                 $filters
+     * @param callable(array<string, scalar|list<string>|null>): array<string, mixed> $listFn
+     * @param array<string, scalar|list<string>|null>                                  $filters
      *
      * @return \Generator<int, mixed>
      */

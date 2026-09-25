@@ -108,9 +108,9 @@ final class Transport
     /**
      * Perform one API call, retrying transient failures per the policy.
      *
-     * @param array<string, scalar|null>  $query
-     * @param array<string, mixed>|null   $body
-     * @param array<string, string>       $extraHeaders
+     * @param array<string, scalar|list<string>|null> $query
+     * @param array<string, mixed>|null               $body
+     * @param array<string, string>                   $extraHeaders
      *
      * @return array<string, mixed> Decoded JSON body (``[]`` when empty)
      */
@@ -130,9 +130,9 @@ final class Transport
     /**
      * The retry loop. Returns the first 2xx response body, or throws.
      *
-     * @param array<string, scalar|null> $query
-     * @param array<string, mixed>|null  $body
-     * @param array<string, string>      $extraHeaders
+     * @param array<string, scalar|list<string>|null> $query
+     * @param array<string, mixed>|null               $body
+     * @param array<string, string>                   $extraHeaders
      */
     private function perform(
         string $method,
@@ -430,7 +430,13 @@ final class Transport
             // exactly the query string the rest of this class is careful
             // to strip — and this message lands in the caller's exception
             // handler, their error tracker, and their logs.
-            throw new ApiConnectionException(self::stripQueryStrings($err->getMessage()));
+            // The original exception rides along as ``getPrevious()``: the
+            // message is sanitised and generic ("cURL error 6"), and the
+            // client's own exception is the only thing carrying the rest.
+            throw new ApiConnectionException(
+                self::stripQueryStrings($err->getMessage()),
+                previous: $err,
+            );
         }
 
         $respHeaders = [];
@@ -485,7 +491,7 @@ final class Transport
     }
 
     /**
-     * @param array<string, scalar|null> $query
+     * @param array<string, scalar|list<string>|null> $query
      */
     private function buildUrl(string $path, array $query): string
     {
@@ -499,18 +505,23 @@ final class Transport
     /**
      * Serialise query params the same way the Node SDK does: skip
      * ``null``, stringify booleans as ``true``/``false`` (not ``1``/``0``),
+     * join a list with commas (the API's ``expand=a,b`` shape), and
      * URL-encode everything else.
      *
-     * @param array<string, scalar|null> $query
+     * @param array<string, scalar|list<string>|null> $query
      */
     private function buildQuery(array $query): string
     {
         $parts = [];
         foreach ($query as $key => $value) {
-            if ($value === null) {
+            if ($value === null || $value === []) {
                 continue;
             }
-            $encoded = is_bool($value) ? ($value ? 'true' : 'false') : (string) $value;
+            $encoded = match (true) {
+                is_array($value) => implode(',', $value),
+                is_bool($value) => $value ? 'true' : 'false',
+                default => (string) $value,
+            };
             $parts[] = rawurlencode($key) . '=' . rawurlencode($encoded);
         }
 

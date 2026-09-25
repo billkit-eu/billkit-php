@@ -111,7 +111,11 @@ final class Webhooks
         if ($timestamp === null || $timestamp === '' || $signatures === []) {
             throw new WebhookVerificationException("Malformed BillKit-Signature header: {$header}");
         }
-        if (!ctype_digit($timestamp)) {
+        // ``ctype_digit`` already refuses a sign, so a negative ``t`` never
+        // gets this far; ``0`` would, and it is refused here rather than
+        // several lines later by the tolerance window, so the message names
+        // the real fault and matches node's wording.
+        if (!ctype_digit($timestamp) || (int) $timestamp <= 0) {
             throw new WebhookVerificationException("Malformed timestamp in BillKit-Signature: {$timestamp}");
         }
 

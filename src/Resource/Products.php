@@ -24,11 +24,18 @@ final class Products extends BaseResource
     /**
      * Fetch a single product by id.
      *
+     * ``['expand' => ['prices']]`` attaches every price on the product
+     * (archived ones too, active first); ``'stats'`` attaches the live
+     * subscriber and revenue counts. Those two are the only relations this
+     * route expands.
+     *
+     * @param array<string, scalar|list<string>|null> $params ``expand`` only
+     *
      * @return array<string, mixed>
      */
-    public function retrieve(string $id): array
+    public function retrieve(string $id, array $params = []): array
     {
-        return $this->get("/v1/products/{$id}");
+        return $this->get('/v1/products/' . self::p($id), $params);
     }
 
     /**
@@ -45,14 +52,17 @@ final class Products extends BaseResource
      */
     public function update(string $id, array $params): array
     {
-        return $this->post("/v1/products/{$id}", $params);
+        return $this->post('/v1/products/' . self::p($id), $params);
     }
 
     /**
      * List one page of products. Use {@see self::autoPagingIterator()} to
      * walk every page.
      *
-     * @param array<string, scalar|null> $params
+     * ``['expand' => ['prices', 'stats']]`` is accepted here too, and is
+     * resolved for the whole page in one query rather than per row.
+     *
+     * @param array<string, scalar|list<string>|null> $params
      *
      * @return array<string, mixed>
      */

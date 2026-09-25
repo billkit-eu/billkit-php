@@ -25,7 +25,7 @@ final class CreditNotes extends BaseResource
      */
     public function retrieve(string $id): array
     {
-        return $this->get("/v1/credit_notes/{$id}");
+        return $this->get('/v1/credit_notes/' . self::p($id));
     }
 
     /**
@@ -46,7 +46,7 @@ final class CreditNotes extends BaseResource
      */
     public function retrievePdf(string $id): string
     {
-        return $this->transport->requestBytes('GET', "/v1/credit_notes/{$id}/pdf");
+        return $this->transport->requestBytes('GET', '/v1/credit_notes/' . self::p($id) . '/pdf');
     }
 
     /**

@@ -28,7 +28,7 @@ final class TaxRates extends BaseResource
      */
     public function retrieve(string $id): array
     {
-        return $this->get("/v1/tax_rates/{$id}");
+        return $this->get('/v1/tax_rates/' . self::p($id));
     }
 
     /**
@@ -40,7 +40,7 @@ final class TaxRates extends BaseResource
      */
     public function update(string $id, array $params): array
     {
-        return $this->post("/v1/tax_rates/{$id}", $params);
+        return $this->post('/v1/tax_rates/' . self::p($id), $params);
     }
 
     /**

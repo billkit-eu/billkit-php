@@ -10,6 +10,20 @@ use BillKit\Collection;
 final class WebhookEndpoints extends BaseResource
 {
     /**
+     * Every event type this deployment can deliver, plus the wildcard.
+     *
+     * ``enabled_events`` rejects anything not on this list, so read it
+     * rather than hard-coding a set: a name that is not on it fails at
+     * registration and leaves you with an endpoint that never fires.
+     *
+     * @return array<string, mixed>
+     */
+    public function listEventTypes(): array
+    {
+        return $this->get('/v1/webhook_endpoints/event_types');
+    }
+
+    /**
      * Register a webhook endpoint.
      *
      * @param array<string, mixed> $params
@@ -28,7 +42,7 @@ final class WebhookEndpoints extends BaseResource
      */
     public function retrieve(string $id): array
     {
-        return $this->get("/v1/webhook_endpoints/{$id}");
+        return $this->get('/v1/webhook_endpoints/' . self::p($id));
     }
 
     /**
@@ -45,7 +59,7 @@ final class WebhookEndpoints extends BaseResource
      */
     public function update(string $id, array $params): array
     {
-        return $this->post("/v1/webhook_endpoints/{$id}", $params);
+        return $this->post('/v1/webhook_endpoints/' . self::p($id), $params);
     }
 
     /**
@@ -62,7 +76,7 @@ final class WebhookEndpoints extends BaseResource
      */
     public function delete(string $id, ?string $idempotencyKey = null): array
     {
-        return $this->del("/v1/webhook_endpoints/{$id}", $idempotencyKey);
+        return $this->del('/v1/webhook_endpoints/' . self::p($id), $idempotencyKey);
     }
 
     /**
@@ -72,7 +86,7 @@ final class WebhookEndpoints extends BaseResource
      */
     public function rotateSecret(string $id, ?string $idempotencyKey = null): array
     {
-        return $this->postEmpty("/v1/webhook_endpoints/{$id}/rotate_secret", $idempotencyKey);
+        return $this->postEmpty('/v1/webhook_endpoints/' . self::p($id) . '/rotate_secret', $idempotencyKey);
     }
 
     /**
@@ -110,7 +124,7 @@ final class WebhookEndpoints extends BaseResource
      */
     public function allDeliveries(string $endpointId, array $params = []): array
     {
-        return $this->get("/v1/webhook_endpoints/{$endpointId}/deliveries", $params);
+        return $this->get('/v1/webhook_endpoints/' . self::p($endpointId) . '/deliveries', $params);
     }
 
     /**
@@ -121,7 +135,7 @@ final class WebhookEndpoints extends BaseResource
     public function autoPagingIteratorDeliveries(string $endpointId, ?int $pageSize = null): \Generator
     {
         yield from Collection::autoPagingIterator(
-            fn (array $p): array => $this->get("/v1/webhook_endpoints/{$endpointId}/deliveries", $p),
+            fn (array $p): array => $this->get('/v1/webhook_endpoints/' . self::p($endpointId) . '/deliveries', $p),
             $pageSize,
         );
     }
@@ -133,7 +147,7 @@ final class WebhookEndpoints extends BaseResource
      */
     public function retrieveDelivery(string $endpointId, string $deliveryId): array
     {
-        return $this->get("/v1/webhook_endpoints/{$endpointId}/deliveries/{$deliveryId}");
+        return $this->get('/v1/webhook_endpoints/' . self::p($endpointId) . '/deliveries/' . self::p($deliveryId));
     }
 
     /**
@@ -145,7 +159,7 @@ final class WebhookEndpoints extends BaseResource
     public function redeliver(string $endpointId, string $deliveryId, ?string $idempotencyKey = null): array
     {
         return $this->postEmpty(
-            "/v1/webhook_endpoints/{$endpointId}/deliveries/{$deliveryId}/redeliver",
+            '/v1/webhook_endpoints/' . self::p($endpointId) . '/deliveries/' . self::p($deliveryId) . '/redeliver',
             $idempotencyKey,
         );
     }

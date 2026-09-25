@@ -28,7 +28,7 @@ final class Customers extends BaseResource
      */
     public function retrieve(string $id): array
     {
-        return $this->get("/v1/customers/{$id}");
+        return $this->get('/v1/customers/' . self::p($id));
     }
 
     /**
@@ -40,7 +40,7 @@ final class Customers extends BaseResource
      */
     public function update(string $id, array $params = []): array
     {
-        return $this->post("/v1/customers/{$id}", $params);
+        return $this->post('/v1/customers/' . self::p($id), $params);
     }
 
     /**
@@ -57,7 +57,7 @@ final class Customers extends BaseResource
      */
     public function delete(string $id, ?string $idempotencyKey = null): array
     {
-        return $this->del("/v1/customers/{$id}", $idempotencyKey);
+        return $this->del('/v1/customers/' . self::p($id), $idempotencyKey);
     }
 
     /**
@@ -71,7 +71,11 @@ final class Customers extends BaseResource
      * cart-recovery worklist), or omit for both. Abandoned rows are swept
      * after the tenant's retention window.
      *
-     * @param array<string, scalar|null> $params
+     * ``['expand' => ['stats']]`` attaches each customer's lifetime totals.
+     * ``stats`` is the only relation this route expands; anything else is a
+     * ``400`` naming it.
+     *
+     * @param array<string, scalar|list<string>|null> $params
      *
      * @return array<string, mixed>
      */
@@ -94,16 +98,46 @@ final class Customers extends BaseResource
     }
 
     /**
-     * Attach or replace the customer's VAT number; triggers server-side
-     * VIES validation. The response carries ``vat_number_validated``.
+     * Attach, replace, or clear the customer's VAT number; triggers
+     * server-side VIES validation. The response carries
+     * ``vat_number_validated``.
      *
-     * @param array<string, mixed> $params
+     * ``['vat_number' => null]`` **clears** the registration and is sent as
+     * an explicit JSON null rather than stripped, which is the one place in
+     * this SDK where a ``null`` in a params array is a value rather than an
+     * omission. VIES needs a country, so pass ``country_code`` when the
+     * customer does not have one yet; that one is still dropped when null.
+     *
+     * Because a null here is a value, the key has to be present: an array
+     * without ``vat_number`` is refused rather than read as a clear, which is
+     * what an absent key would otherwise become. Node and python make the
+     * field required; this is the same rule for a language without one.
+     *
+     * @param array<string, mixed> $params ``vat_number`` (``null`` clears),
+     *                                     optional ``country_code``, optional
+     *                                     ``idempotency_key``
      *
      * @return array<string, mixed>
+     *
+     * @throws \InvalidArgumentException when ``vat_number`` is absent
      */
     public function setVatNumber(string $id, array $params): array
     {
-        return $this->post("/v1/customers/{$id}/vat_number", $params);
+        if (!array_key_exists('vat_number', $params)) {
+            throw new \InvalidArgumentException(
+                'setVatNumber() needs a vat_number key: a string sets the registration and an explicit null clears it.'
+            );
+        }
+        $body = ['vat_number' => $params['vat_number']];
+        if (($params['country_code'] ?? null) !== null) {
+            $body['country_code'] = $params['country_code'];
+        }
+
+        return $this->postFixed(
+            '/v1/customers/' . self::p($id) . '/vat_number',
+            $body,
+            $this->idempotencyKeyOf($params),
+        );
     }
 
     /**
@@ -122,7 +156,7 @@ final class Customers extends BaseResource
         $confirmed = $params['confirmed'] ?? true;
 
         return $this->postFixed(
-            "/v1/customers/{$id}/purge",
+            '/v1/customers/' . self::p($id) . '/purge',
             ['confirmed' => $confirmed],
             $this->idempotencyKeyOf($params),
         );

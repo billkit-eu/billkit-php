@@ -62,24 +62,39 @@ final class Prices extends BaseResource
      */
     public function retrieve(string $id): array
     {
-        return $this->get("/v1/prices/{$id}");
+        return $this->get('/v1/prices/' . self::p($id));
     }
 
     /**
-     * Archive a price so it stops selling, or put it back on sale.
+     * Change what a price does next. Omitted fields are left alone.
      *
-     * Pass `['active' => false]` to archive. The price keeps its id and
-     * is still returned by {@see self::retrieve()} and {@see self::all()},
-     * because subscriptions renew against it by id and what they are
-     * charged has to stay readable. Subscriptions already on the price
-     * go on renewing against it; what stops is new business, so a
-     * checkout against it is refused and it is no longer offered as a
-     * plan change.
+     * The dividing line is what a field decides. `amount_cents`,
+     * `currency`, `interval` and `usage_type` decide **what a past charge
+     * was**, so they are fixed at creation and are not accepted here:
+     * subscriptions renew against a price by id, and editing one would
+     * re-price live customers and make an issued invoice unreadable. To
+     * charge something different, create a new price.
      *
-     * Pass `['active' => true]` to undo that. `active` is the only field
-     * because the amount, currency and interval are fixed at creation,
-     * and since none of them move here neither direction can change what
-     * a past charge was made under.
+     * Everything this route takes decides **what happens next**:
+     *
+     * - `active` — `false` archives the price. It keeps its id and stays
+     *   readable, subscriptions already on it go on renewing, and what
+     *   stops is new business; `true` puts it back on sale.
+     * - `metadata` — replaces the whole object rather than merging.
+     * - `tax_behavior` — `'inclusive'` or `'exclusive'`; see below.
+     * - `payment_methods` — read when a checkout opens; at least one entry.
+     * - `refund_on_cancel` — `'none'` | `'full'` | `'prorated'`.
+     * - `refund_window_initial_days` / `refund_window_renewal_days` — `0`
+     *   disables refunds for that charge type, `N > 0` is an N-day window.
+     *
+     * The refund fields are the useful part: setting `refund_on_cancel`
+     * here covers the customers already on the price, which is why it is
+     * editable rather than create-only.
+     *
+     * `tax_behavior` is the exception and moves **one way**. It can be set
+     * while the price is still `'unspecified'` and never changed again,
+     * because flipping it would restate whether tax was inside or on top
+     * of an amount somebody has already paid.
      *
      * Sending the value a price already has returns it unchanged and
      * emits no second event, so a retry is safe. Archiving emits
@@ -91,7 +106,7 @@ final class Prices extends BaseResource
      */
     public function update(string $id, array $params): array
     {
-        return $this->post("/v1/prices/{$id}", $params);
+        return $this->post('/v1/prices/' . self::p($id), $params);
     }
 
     /**
@@ -108,15 +123,17 @@ final class Prices extends BaseResource
     }
 
     /**
-     * Yield every price across all pages.
+     * Yield every price across all pages, optionally narrowed to one
+     * product.
      *
      * @return \Generator<int, mixed>
      */
-    public function autoPagingIterator(?int $pageSize = null): \Generator
+    public function autoPagingIterator(?int $pageSize = null, ?string $productId = null): \Generator
     {
         yield from Collection::autoPagingIterator(
             fn (array $p): array => $this->get('/v1/prices', $p),
             $pageSize,
+            ['product_id' => $productId],
         );
     }
 }

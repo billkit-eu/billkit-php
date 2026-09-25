@@ -34,7 +34,7 @@ final class Refunds extends BaseResource
      */
     public function retrieve(string $id): array
     {
-        return $this->get("/v1/refunds/{$id}");
+        return $this->get('/v1/refunds/' . self::p($id));
     }
 
     /**

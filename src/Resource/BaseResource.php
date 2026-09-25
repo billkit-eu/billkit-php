@@ -24,7 +24,22 @@ abstract class BaseResource
     }
 
     /**
-     * @param array<string, scalar|null> $query
+     * Percent-encode a caller-supplied id before it becomes a path segment.
+     *
+     * Ids reach the SDK from the caller's own storage, and one carrying
+     * ``/``, ``?`` or ``#`` would otherwise rewrite the request: ``#``
+     * truncates the path, ``?`` turns the tail into a query string, and
+     * ``/`` walks to a different route entirely. Encoding keeps the request
+     * on the route the method names, so a bad id is a clean ``404`` rather
+     * than a call somewhere else.
+     */
+    protected static function p(string $id): string
+    {
+        return rawurlencode($id);
+    }
+
+    /**
+     * @param array<string, scalar|list<string>|null> $query
      *
      * @return array<string, mixed>
      */

@@ -17,20 +17,20 @@ final class BillingPortalSessions extends BaseResource
      * Mint a portal session for a subscription; the raw token + URL are
      * returned once.
      *
-     * @param array<string, mixed> $params Requires ``subscription_id`` and ``return_url``.
+     * ``['deliver_email' => true]`` also emails the portal link to the
+     * subscription's customer, at the address on their record, as a
+     * tenant-branded message. It defaults to ``false``: without it you
+     * distribute the returned ``url`` yourself.
+     *
+     * @param array<string, mixed> $params Requires ``subscription_id`` and
+     *                                     ``return_url``; optional
+     *                                     ``deliver_email``.
      *
      * @return array<string, mixed>
      */
     public function create(array $params): array
     {
-        return $this->postFixed(
-            '/v1/billing_portal/sessions',
-            [
-                'subscription_id' => $params['subscription_id'] ?? null,
-                'return_url' => $params['return_url'] ?? null,
-            ],
-            $this->idempotencyKeyOf($params),
-        );
+        return $this->post('/v1/billing_portal/sessions', $params);
     }
 
     /**
@@ -40,6 +40,6 @@ final class BillingPortalSessions extends BaseResource
      */
     public function revoke(string $id, ?string $idempotencyKey = null): array
     {
-        return $this->postEmpty("/v1/billing_portal/sessions/{$id}/revoke", $idempotencyKey);
+        return $this->postEmpty('/v1/billing_portal/sessions/' . self::p($id) . '/revoke', $idempotencyKey);
     }
 }

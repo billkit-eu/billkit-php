@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BillKit;
 
+use BillKit\Resource\ApiKeys;
 use BillKit\Resource\AuditLogs;
 use BillKit\Resource\BillingPortalSessions;
 use BillKit\Resource\CheckoutSessions;
@@ -54,6 +55,7 @@ final class BillKitClient
 {
     public readonly Transport $transport;
 
+    public readonly ApiKeys $apiKeys;
     public readonly Customers $customers;
     public readonly Products $products;
     public readonly Prices $prices;
@@ -101,6 +103,7 @@ final class BillKitClient
             $logger,
         );
 
+        $this->apiKeys = new ApiKeys($this->transport);
         $this->customers = new Customers($this->transport);
         $this->products = new Products($this->transport);
         $this->prices = new Prices($this->transport);

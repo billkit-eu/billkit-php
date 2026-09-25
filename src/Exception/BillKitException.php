@@ -31,8 +31,15 @@ class BillKitException extends \RuntimeException
         public readonly ?int $statusCode = null,
         public readonly ?string $requestId = null,
         public readonly mixed $rawBody = null,
+        ?\Throwable $previous = null,
     ) {
-        parent::__construct($message);
+        // ``$previous`` is only ever set on {@see ApiConnectionException}:
+        // a PSR-18 client reports every transport failure through its own
+        // exception, and dropping it left the caller with a sanitised
+        // message and nothing to diagnose. Reach it with ``getPrevious()``.
+        // The int ``$code`` stays 0: the HTTP status lives on
+        // ``$statusCode``, because ``\Exception::$code`` is not it.
+        parent::__construct($message, 0, $previous);
     }
 
     /**

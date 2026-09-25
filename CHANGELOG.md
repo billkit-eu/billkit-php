@@ -8,6 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versioning is independent of the Node and Python SDKs; each ships on its own
 cadence.
 
+## [0.7.0] - 2026-09-23
+
+### Fixed
+- **Every caller-supplied path id is percent-encoded** by `BaseResource::p()`. An id carrying `/`, `?` or `#` used to rewrite the request onto a different route; it is now a clean `404`.
+- **`ApiConnectionException` keeps the PSR-18 client's own exception as `getPrevious()`.** The message is sanitised of query strings and generic ("cURL error 6"), so dropping the original left nothing to diagnose with.
+- **`billingPortalSessions->create()` prunes nulls instead of sending a fixed two-key body**, so a new field on the route is reachable without an SDK change.
+- The `>=0.3.0 <1` laravel dependency range quoted in `DEVELOPMENT.md` had not followed `composer.json`.
+- `Webhooks::verifySignature` reports `t=0` as a malformed timestamp rather than letting it fall through to the tolerance window, which is what node has always said. Both refused it; only the message differed.
+
+### Added
+- **`$client->apiKeys`**: `create`, `retrieve`, `revoke`, `all`, `autoPagingIterator`. The secret is returned once, on create.
+- **`invoices->sendEmail($id)`** for `POST /v1/invoices/{id}/email`, which re-sends the "your invoice is ready" email with a fresh portal link.
+- **`payments->retrieveProvider($id)`** for `GET /v1/payments/{id}/provider`: the provider's live record, which answers `available: false` rather than erroring when it cannot be read.
+- **`tenant->billingProfile()` / `tenant->setBillingProfile()`** for the seller's country, VAT id and invoice address.
+- **`tenant->export()`** returns the account's full JSON export as raw bytes, through the same binary path the PDFs use.
+- **`webhookEndpoints->listEventTypes()`** for the deliverable-event catalogue `enabled_events` is validated against.
+- **`expand`** on `customers->all()`, `products`, `subscriptions`, `payments`, `invoices` and `events->all()`, and as a second argument on `products->retrieve()`, `subscriptions->retrieve()`, `payments->retrieve()` and `invoices->retrieve()`. A list value is joined with commas by the transport.
+- **List filters carried onto every page**: `payments->autoPagingIterator($pageSize, $customerId)`, `disputes->autoPagingIterator($pageSize, $status, $paymentId)`, `invoices->autoPagingIterator($pageSize, $filters)` and `prices->autoPagingIterator($pageSize, $productId)`.
+- `checkoutSessions->create()` documents `country`, which is what lets VAT apply to the first charge on the hosted flow; `billingPortalSessions->create()` documents `deliver_email`.
+
+### Changed
+- **`prices->update()` documents every field `PriceUpdate` accepts** (`active`, `metadata`, `tax_behavior`, `payment_methods`, `refund_on_cancel`, `refund_window_initial_days`, `refund_window_renewal_days`), all optional, where the docblock had said `active` was the only one.
+- **`customers->setVatNumber(['vat_number' => null])` clears the registration**: that one null is sent as an explicit JSON null rather than stripped. `country_code` is still dropped when null. An array without the `vat_number` key is refused with `InvalidArgumentException` rather than read as a clear.
+- **`tenant->setBillingProfile()` reads a present-but-null key as a clear** and an absent key as "leave it alone", matching `TenantBillingProfileUpdate`.
+- `coupons->create()` documents the API's two `discount_type` literals, `percent` and `fixed_cents`.
+
 ## [0.6.0] - 2026-09-23
 
 ### Added

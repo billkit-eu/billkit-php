@@ -50,10 +50,17 @@ final class IntegrationTest extends TestCase
         'crud.webhook_endpoint',
         'crud.price_decimal_rate',
         'crud.price_tiered',
+        'crud.price_update_fields',
+        'crud.coupon_discount_type_literals',
         'crud.credit_note_absent_until_refunded',
         'filters.subscription_renewal_state',
         'filters.customer_provisional',
         'filters.audit_resource_id',
+        'filters.expand',
+        'customers.vat_number_clear',
+        'routes.api_keys',
+        'routes.event_types',
+        'routes.tenant_billing_profile',
         'pagination.has_more',
         'pagination.auto_iter',
         'idempotency.replay',
@@ -288,6 +295,61 @@ final class IntegrationTest extends TestCase
         $back = $c->prices->update((string) $price['id'], ['active' => true]);
         self::assertTrue($back['active']);
         self::assertSame(777, $back['amount_cents']);
+    }
+
+    public function testCrudPriceUpdateFields(): void
+    {
+        $c = $this->client();
+        ['price' => $price] = $this->makePlan($c, 1500);
+
+        // No `active` in the body. Every field is optional and an omitted
+        // one is left alone, so a refund policy can be set on a live price
+        // without restating whether it is on sale.
+        $updated = $c->prices->update((string) $price['id'], [
+            'metadata' => ['tier' => 'pro'],
+            'refund_on_cancel' => 'prorated',
+            // 0 disables refunds for that charge type, so it has to survive
+            // the SDK's own null-stripping.
+            'refund_window_renewal_days' => 0,
+        ]);
+        self::assertSame(['tier' => 'pro'], $updated['metadata']);
+        self::assertSame('prorated', $updated['refund_on_cancel']);
+        self::assertSame(0, $updated['refund_window_renewal_days']);
+        self::assertTrue($updated['active']);
+
+        $fetched = $c->prices->retrieve((string) $price['id']);
+        self::assertTrue($fetched['active']);
+        self::assertSame(1500, $fetched['amount_cents']);
+    }
+
+    public function testCrudCouponDiscountTypeLiterals(): void
+    {
+        $c = $this->client();
+
+        $percent = $c->coupons->create([
+            'code' => 'PCT' . substr(IntegrationHarness::idemKey(), -10),
+            'discount_type' => 'percent',
+            'discount_value' => 10,
+            'duration' => 'once',
+        ]);
+        self::assertSame('percent', $percent['discount_type']);
+
+        $fixed = $c->coupons->create([
+            'code' => 'FIX' . substr(IntegrationHarness::idemKey(), -10),
+            'discount_type' => 'fixed_cents',
+            'discount_value' => 500,
+            'duration' => 'once',
+        ]);
+        self::assertSame('fixed_cents', $fixed['discount_type']);
+
+        // The value these SDKs used to document. It is not a synonym.
+        $this->expectException(InvalidRequestException::class);
+        $c->coupons->create([
+            'code' => 'BAD' . substr(IntegrationHarness::idemKey(), -10),
+            'discount_type' => 'percentage',
+            'discount_value' => 10,
+            'duration' => 'once',
+        ]);
     }
 
     public function testCrudCustomer(): void
@@ -529,6 +591,34 @@ final class IntegrationTest extends TestCase
      * forwards an array; node and python named three of the API's four
      * filters and omitted this one, which is what the scenario pins.
      */
+    public function testFiltersExpand(): void
+    {
+        $c = $this->client();
+        ['product' => $product, 'price' => $price] = $this->makePlan($c, 4200);
+
+        // On a list. Resolved once for the whole page, which is the point:
+        // the alternative a caller reaches for is one request per row.
+        $page = $c->products->all(['expand' => ['prices'], 'limit' => 100]);
+        $rows = array_values(array_filter(
+            $page['data'],
+            static fn (array $row): bool => $row['id'] === $product['id'],
+        ));
+        self::assertCount(1, $rows);
+        self::assertContains($price['id'], array_column($rows[0]['prices'], 'id'));
+
+        // And on a retrieve, as a second argument.
+        $one = $c->products->retrieve((string) $product['id'], ['expand' => ['prices']]);
+        self::assertContains($price['id'], array_column($one['prices'], 'id'));
+
+        // Without it, nothing changes for a caller that never asked.
+        self::assertNull($c->products->retrieve((string) $product['id'])['prices'] ?? null);
+
+        // An unknown relation is a 400 naming the ones that work, not a
+        // response that quietly lacks the key.
+        $this->expectException(InvalidRequestException::class);
+        $c->products->retrieve((string) $product['id'], ['expand' => ['nonsense']]);
+    }
+
     public function testFiltersAuditResourceId(): void
     {
         $t = IntegrationHarness::provisionTenant('audit-resource');
@@ -551,6 +641,137 @@ final class IntegrationTest extends TestCase
         $narrowed = $rows(['resource_id' => $subject['id'], 'resource_type' => 'customer']);
         self::assertNotEmpty($narrowed);
         self::assertSame([$subject['id']], array_values(array_unique(array_column($narrowed, 'resource_id'))));
+    }
+
+    // ── customers ────────────────────────────────────────────────────
+
+    public function testCustomersVatNumberClear(): void
+    {
+        $c = $this->client();
+        // No country on the customer: VIES needs one, so the API stores
+        // the number as unverifiable without opening a socket. That keeps
+        // the scenario about the SDK's body rather than about the EU's
+        // uptime.
+        $customer = $c->customers->create([
+            'email' => 'vat-' . IntegrationHarness::idemKey() . '@sdk-it.example.com',
+        ]);
+
+        $stored = $c->customers->setVatNumber((string) $customer['id'], [
+            'vat_number' => 'NL123456789B01',
+        ]);
+        self::assertSame('NL123456789B01', $stored['vat_number']);
+
+        // The one body where null is a value. Stripped, it would be an
+        // empty object, which the API reads as "change nothing".
+        $cleared = $c->customers->setVatNumber((string) $customer['id'], ['vat_number' => null]);
+        self::assertNull($cleared['vat_number']);
+        self::assertNull($c->customers->retrieve((string) $customer['id'])['vat_number']);
+    }
+
+    // ── routes ───────────────────────────────────────────────────────
+
+    public function testRoutesApiKeys(): void
+    {
+        $c = new BillKitClient(
+            apiKey: IntegrationHarness::provisionTenant('api-keys')['api_key'],
+            baseUrl: IntegrationHarness::baseUrl(),
+        );
+
+        $created = $c->apiKeys->create(['label' => 'integration', 'scopes' => ['products:read']]);
+        self::assertNotEmpty($created['secret']);
+        self::assertSame(['products:read'], $created['scopes']);
+
+        // The secret exists once. Every later read carries the prefix alone.
+        $fetched = $c->apiKeys->retrieve((string) $created['id']);
+        self::assertSame($created['id'], $fetched['id']);
+        self::assertNull($fetched['secret'] ?? null);
+        self::assertNotEmpty($fetched['prefix']);
+
+        self::assertContains(
+            $created['id'],
+            array_column($c->apiKeys->all(['limit' => 100])['data'], 'id'),
+        );
+
+        $revoked = $c->apiKeys->revoke((string) $created['id']);
+        self::assertNotEmpty($revoked['revoked_at']);
+
+        // A revoked key stays listed: "this key was in service until
+        // Tuesday" is the question a leak investigation asks.
+        $after = $c->apiKeys->all(['limit' => 100])['data'];
+        $row = array_values(array_filter(
+            $after,
+            static fn (array $k): bool => $k['id'] === $created['id'],
+        ));
+        self::assertNotEmpty($row[0]['revoked_at']);
+    }
+
+    public function testRoutesEventTypes(): void
+    {
+        $c = $this->client();
+        $catalogue = $c->webhookEndpoints->listEventTypes();
+        self::assertSame('event_type_list', $catalogue['object']);
+        self::assertNotEmpty($catalogue['data']);
+        self::assertNotEmpty($catalogue['wildcard']);
+
+        // enabled_events is validated against exactly this list, so a name
+        // it returns has to register.
+        $endpoint = $c->webhookEndpoints->create([
+            'url' => 'https://merchant.example.com/hooks',
+            'enabled_events' => [$catalogue['data'][0]],
+        ]);
+        self::assertNotEmpty($endpoint['id']);
+        $c->webhookEndpoints->delete((string) $endpoint['id']);
+    }
+
+    public function testRoutesTenantBillingProfile(): void
+    {
+        $c = new BillKitClient(
+            apiKey: IntegrationHarness::provisionTenant('billing-profile')['api_key'],
+            baseUrl: IntegrationHarness::baseUrl(),
+        );
+
+        $stored = $c->tenant->setBillingProfile([
+            'country_code' => 'NL',
+            'vat_id' => 'NL123456789B01',
+            'city' => 'Amsterdam',
+        ]);
+        self::assertSame('NL', $stored['country_code']);
+        self::assertSame('NL123456789B01', $stored['vat_id']);
+
+        $read = $c->tenant->billingProfile();
+        self::assertSame('NL123456789B01', $read['vat_id']);
+        // Stored and effective agree once something is stored; they differ
+        // only when nothing ever was.
+        self::assertSame('NL', $read['effective_country_code']);
+
+        // A stored VAT id is locked: changing it and clearing it with an
+        // explicit null are both refused, and the refusal names the field.
+        foreach (['NL000099998B57', null] as $vatId) {
+            try {
+                $c->tenant->setBillingProfile([
+                    'country_code' => 'NL',
+                    'vat_id' => $vatId,
+                    'city' => 'Rotterdam',
+                ]);
+                self::fail('expected InvalidRequestException');
+            } catch (InvalidRequestException $e) {
+                self::assertSame('vat_id', $e->param);
+                self::assertSame('parameter_invalid', $e->errorCode);
+                self::assertStringContainsString('cannot be changed once it is set', $e->getMessage());
+                self::assertIsArray($e->rawBody);
+                self::assertSame('vat_id_locked', $e->rawBody['error']['reason'] ?? null);
+            }
+        }
+
+        // The refused call wrote nothing, including the city it carried.
+        $after = $c->tenant->billingProfile();
+        self::assertSame('NL123456789B01', $after['vat_id']);
+        self::assertSame('Amsterdam', $after['city']);
+
+        // Everything else stays editable: omit vat_id and it is left alone.
+        $moved = $c->tenant->setBillingProfile(['country_code' => 'NL', 'city' => 'Utrecht']);
+        self::assertSame('Utrecht', $moved['city']);
+        self::assertSame('NL123456789B01', $moved['vat_id']);
     }
 
     // ── pagination ───────────────────────────────────────────────────

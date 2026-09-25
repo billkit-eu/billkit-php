@@ -12,11 +12,18 @@ final class Subscriptions extends BaseResource
     /**
      * Fetch a single subscription by id.
      *
+     * ``['expand' => ['customer', 'price', 'refund_eligibility']]``
+     * attaches the buyer summary, the price (with its product name), and
+     * what a cancellation would refund right now. Those three are the only
+     * relations this route expands.
+     *
+     * @param array<string, scalar|list<string>|null> $params ``expand`` only
+     *
      * @return array<string, mixed>
      */
-    public function retrieve(string $id): array
+    public function retrieve(string $id, array $params = []): array
     {
-        return $this->get("/v1/subscriptions/{$id}");
+        return $this->get('/v1/subscriptions/' . self::p($id), $params);
     }
 
     /**
@@ -39,7 +46,10 @@ final class Subscriptions extends BaseResource
      * ones. `['status' => 'paused']` is not accepted and throws
      * {@see \BillKit\Exception\InvalidRequestException}.
      *
-     * @param array<string, scalar|null> $params
+     * ``['expand' => ['customer', 'price', 'refund_eligibility']]`` is
+     * accepted here too, resolved for the whole page in one query.
+     *
+     * @param array<string, scalar|list<string>|null> $params
      *
      * @return array<string, mixed>
      */
@@ -56,7 +66,7 @@ final class Subscriptions extends BaseResource
      * server-side. Filtering the pages yourself after the fact means
      * paging the whole history to find the tail of the match.
      *
-     * @param array<string, scalar|null> $filters
+     * @param array<string, scalar|list<string>|null> $filters
      *
      * @return \Generator<int, mixed>
      */
@@ -76,7 +86,7 @@ final class Subscriptions extends BaseResource
      */
     public function cancel(string $id, ?string $idempotencyKey = null): array
     {
-        return $this->postEmpty("/v1/subscriptions/{$id}/cancel", $idempotencyKey);
+        return $this->postEmpty('/v1/subscriptions/' . self::p($id) . '/cancel', $idempotencyKey);
     }
 
     /**
@@ -86,7 +96,7 @@ final class Subscriptions extends BaseResource
      */
     public function pause(string $id, ?string $idempotencyKey = null): array
     {
-        return $this->postEmpty("/v1/subscriptions/{$id}/pause", $idempotencyKey);
+        return $this->postEmpty('/v1/subscriptions/' . self::p($id) . '/pause', $idempotencyKey);
     }
 
     /**
@@ -96,7 +106,7 @@ final class Subscriptions extends BaseResource
      */
     public function resume(string $id, ?string $idempotencyKey = null): array
     {
-        return $this->postEmpty("/v1/subscriptions/{$id}/resume", $idempotencyKey);
+        return $this->postEmpty('/v1/subscriptions/' . self::p($id) . '/resume', $idempotencyKey);
     }
 
     /**
@@ -108,7 +118,7 @@ final class Subscriptions extends BaseResource
      */
     public function reactivate(string $id, ?string $idempotencyKey = null): array
     {
-        return $this->postEmpty("/v1/subscriptions/{$id}/reactivate", $idempotencyKey);
+        return $this->postEmpty('/v1/subscriptions/' . self::p($id) . '/reactivate', $idempotencyKey);
     }
 
     /**
@@ -119,7 +129,7 @@ final class Subscriptions extends BaseResource
     public function previewUpdate(string $id, string $targetPriceId): array
     {
         return $this->postFixed(
-            "/v1/subscriptions/{$id}/preview_update",
+            '/v1/subscriptions/' . self::p($id) . '/preview_update',
             ['target_price_id' => $targetPriceId],
         );
     }
@@ -132,7 +142,7 @@ final class Subscriptions extends BaseResource
     public function update(string $id, string $targetPriceId, ?string $idempotencyKey = null): array
     {
         return $this->postFixed(
-            "/v1/subscriptions/{$id}/update",
+            '/v1/subscriptions/' . self::p($id) . '/update',
             ['target_price_id' => $targetPriceId],
             $idempotencyKey,
         );
@@ -150,7 +160,7 @@ final class Subscriptions extends BaseResource
         ?string $idempotencyKey = null,
     ): array {
         return $this->postFixed(
-            "/v1/subscriptions/{$id}/reauthorize_payment_method",
+            '/v1/subscriptions/' . self::p($id) . '/reauthorize_payment_method',
             ['return_url' => $returnUrl],
             $idempotencyKey,
         );
@@ -185,7 +195,7 @@ final class Subscriptions extends BaseResource
      */
     public function createUsageRecord(string $id, array $params): array
     {
-        return $this->post("/v1/subscriptions/{$id}/usage_records", $params);
+        return $this->post('/v1/subscriptions/' . self::p($id) . '/usage_records', $params);
     }
 
     /**
@@ -202,7 +212,7 @@ final class Subscriptions extends BaseResource
      */
     public function listUsageRecords(string $id, array $params = []): array
     {
-        return $this->get("/v1/subscriptions/{$id}/usage_records", $params);
+        return $this->get('/v1/subscriptions/' . self::p($id) . '/usage_records', $params);
     }
 
     /**
@@ -227,7 +237,7 @@ final class Subscriptions extends BaseResource
      */
     public function retrieveUsageSummary(string $id): array
     {
-        return $this->get("/v1/subscriptions/{$id}/usage_summary");
+        return $this->get('/v1/subscriptions/' . self::p($id) . '/usage_summary');
     }
 
     /**
@@ -249,7 +259,7 @@ final class Subscriptions extends BaseResource
         ?string $invoiceId = null,
     ): \Generator {
         yield from Collection::autoPagingIterator(
-            fn (array $p): array => $this->get("/v1/subscriptions/{$id}/usage_records", $p),
+            fn (array $p): array => $this->get('/v1/subscriptions/' . self::p($id) . '/usage_records', $p),
             $pageSize,
             ['invoice_id' => $invoiceId],
         );

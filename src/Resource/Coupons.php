@@ -12,6 +12,11 @@ final class Coupons extends BaseResource
     /**
      * Create a coupon.
      *
+     * ``discount_type`` takes exactly two values, and they are the API's
+     * spelling rather than English: ``'percent'`` reads ``discount_value``
+     * as whole percent, ``'fixed_cents'`` reads it as minor units off the
+     * charge. Anything else is a ``422``.
+     *
      * @param array<string, mixed> $params
      *
      * @return array<string, mixed>
@@ -28,7 +33,7 @@ final class Coupons extends BaseResource
      */
     public function retrieve(string $id): array
     {
-        return $this->get("/v1/coupons/{$id}");
+        return $this->get('/v1/coupons/' . self::p($id));
     }
 
     /**
@@ -40,7 +45,7 @@ final class Coupons extends BaseResource
      */
     public function update(string $id, array $params): array
     {
-        return $this->post("/v1/coupons/{$id}", $params);
+        return $this->post('/v1/coupons/' . self::p($id), $params);
     }
 
     /**

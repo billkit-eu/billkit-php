@@ -24,14 +24,19 @@ final class Disputes extends BaseResource
      */
     public function retrieve(string $id): array
     {
-        return $this->get("/v1/disputes/{$id}");
+        return $this->get('/v1/disputes/' . self::p($id));
     }
 
     /**
      * List one page of disputes. Use {@see self::autoPagingIterator()} to
      * walk every page.
      *
-     * @param array<string, scalar|null> $params
+     * ``status`` takes a comma-separated list of ``open`` / ``won``; there
+     * is no ``lost``, because the provider gives no signal for one.
+     * ``payment_id`` matches subscription payments only, not one-off
+     * charges.
+     *
+     * @param array<string, scalar|list<string>|null> $params
      *
      * @return array<string, mixed>
      */
@@ -41,15 +46,20 @@ final class Disputes extends BaseResource
     }
 
     /**
-     * Yield every dispute across all pages.
+     * Yield every dispute across all pages, optionally narrowed by status
+     * or payment. Both filters are carried onto every page request.
      *
      * @return \Generator<int, mixed>
      */
-    public function autoPagingIterator(?int $pageSize = null): \Generator
-    {
+    public function autoPagingIterator(
+        ?int $pageSize = null,
+        ?string $status = null,
+        ?string $paymentId = null,
+    ): \Generator {
         yield from Collection::autoPagingIterator(
             fn (array $p): array => $this->get('/v1/disputes', $p),
             $pageSize,
+            ['status' => $status, 'payment_id' => $paymentId],
         );
     }
 }

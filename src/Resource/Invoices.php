@@ -10,19 +10,27 @@ use BillKit\Collection;
  * Read-only access to generated invoices.
  *
  * Invoices are produced by the billing pipeline; tenants don't create
- * them directly. PDF retrieval on the API returns a 302 to the storage
- * adapter's signed URL.
+ * them directly. {@see self::retrievePdf()} hands back the rendered bytes
+ * whichever storage adapter a deployment runs, because the transport
+ * resolves the redirect an S3-backed one answers with.
  */
 final class Invoices extends BaseResource
 {
     /**
-     * Fetch a single invoice by id.
+     * Fetch a single invoice by id, with its line items.
+     *
+     * ``['expand' => ['customer']]`` attaches the buyer summary, and is the
+     * only relation this route expands. The invoice's own
+     * ``*_at_invoice_time`` fields are snapshots of who was billed, so they
+     * stay right even when the customer has since been edited.
+     *
+     * @param array<string, scalar|list<string>|null> $params ``expand`` only
      *
      * @return array<string, mixed>
      */
-    public function retrieve(string $id): array
+    public function retrieve(string $id, array $params = []): array
     {
-        return $this->get("/v1/invoices/{$id}");
+        return $this->get('/v1/invoices/' . self::p($id), $params);
     }
 
     /**
@@ -43,14 +51,39 @@ final class Invoices extends BaseResource
      */
     public function retrievePdf(string $id): string
     {
-        return $this->transport->requestBytes('GET', "/v1/invoices/{$id}/pdf");
+        return $this->transport->requestBytes('GET', '/v1/invoices/' . self::p($id) . '/pdf');
+    }
+
+    /**
+     * Send the customer their invoice again.
+     *
+     * The same tenant-branded "your invoice is ready" email, with a fresh
+     * portal link, because the one in the original may have expired. It
+     * goes to the address captured **on the invoice**, not the customer's
+     * current one: this is a copy of a document that was issued to
+     * somebody. An invoice with no address on file is an
+     * {@see \BillKit\Exception\InvalidRequestException} rather than a send
+     * that quietly did not happen.
+     *
+     * @return array<string, mixed>
+     */
+    public function sendEmail(string $id, ?string $idempotencyKey = null): array
+    {
+        return $this->postEmpty('/v1/invoices/' . self::p($id) . '/email', $idempotencyKey);
     }
 
     /**
      * List one page of invoices. Use {@see self::autoPagingIterator()} to
      * walk every page.
      *
-     * @param array<string, scalar|null> $params
+     * Four filters, each narrowing to one row's worth of invoices:
+     * ``customer_id``, ``subscription_id``, ``payment_id`` (which answers
+     * "which invoice did this charge produce"), and ``status``, one of
+     * ``draft`` / ``open`` / ``paid`` / ``void`` / ``uncollectible``.
+     * ``['expand' => ['customer']]`` is accepted here too. The list carries
+     * no line items; {@see self::retrieve()} is where the breakdown is.
+     *
+     * @param array<string, scalar|list<string>|null> $params
      *
      * @return array<string, mixed>
      */
@@ -60,15 +93,22 @@ final class Invoices extends BaseResource
     }
 
     /**
-     * Yield every invoice across all pages.
+     * Yield every invoice across all pages, optionally narrowed.
+     *
+     * ``$filters`` takes the same id and ``status`` keys {@see self::all()}
+     * does and is carried onto every page request, so a filtered walk
+     * narrows server-side.
+     *
+     * @param array<string, scalar|list<string>|null> $filters
      *
      * @return \Generator<int, mixed>
      */
-    public function autoPagingIterator(?int $pageSize = null): \Generator
+    public function autoPagingIterator(?int $pageSize = null, array $filters = []): \Generator
     {
         yield from Collection::autoPagingIterator(
             fn (array $p): array => $this->get('/v1/invoices', $p),
             $pageSize,
+            $filters,
         );
     }
 
@@ -94,6 +134,6 @@ final class Invoices extends BaseResource
      */
     public function void(string $id, array $params = []): array
     {
-        return $this->post("/v1/invoices/{$id}/void", $params);
+        return $this->post('/v1/invoices/' . self::p($id) . '/void', $params);
     }
 }

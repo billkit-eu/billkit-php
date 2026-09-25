@@ -144,6 +144,10 @@ and tell you BillKit had broken when the request was at fault. The envelope's
 values are still on the thrown object as `errorType`, `errorCode` and `param`
 if you want them.
 
+`ApiConnectionException` is the one that never reached the API at all. Its
+message is sanitised of query strings, so the underlying PSR-18 client's own
+exception is kept as `getPrevious()` when you need the rest of the diagnosis.
+
 ## Retries & idempotency
 
 Transient failures (connection errors, 5xx, and 429 with a short `Retry-After`)
@@ -257,24 +261,61 @@ page) and `autoPagingIterator()` (walk all pages).
 
 | `$client->...` | Methods |
 |--------------|---------|
+| `apiKeys` | create, retrieve, revoke, all, autoPagingIterator |
 | `customers` | create, retrieve, update, delete, all (filter by `provisional`), autoPagingIterator, setVatNumber, purge |
 | `products` | create, retrieve, update (archive with `['active' => false]`), all, autoPagingIterator |
-| `prices` | create, retrieve, update (archive with `['active' => false]`), all, autoPagingIterator |
+| `prices` | create, retrieve, update (archive with `['active' => false]`), all, autoPagingIterator (filter by `product_id`) |
 | `checkoutSessions` | create, retrieve |
 | `oneShotPayments` | create, retrieve |
 | `subscriptions` | retrieve, all, autoPagingIterator (filter by `customer_id`, `status`, `renewal_state`), cancel, pause, resume, reactivate, previewUpdate, update, reauthorizePaymentMethod, createUsageRecord, listUsageRecords, autoPagingIteratorUsageRecords, retrieveUsageSummary |
 | `refunds` | create, retrieve, all, autoPagingIterator |
-| `disputes` | retrieve, all, autoPagingIterator |
-| `webhookEndpoints` | create, retrieve, update (retire with `['status' => 'disabled']`), rotateSecret, all, autoPagingIterator, allDeliveries, autoPagingIteratorDeliveries, retrieveDelivery, redeliver |
+| `disputes` | retrieve, all, autoPagingIterator (filter by `status`, `payment_id`) |
+| `webhookEndpoints` | create, retrieve, update (retire with `['status' => 'disabled']`), rotateSecret, all, autoPagingIterator, allDeliveries, autoPagingIteratorDeliveries, retrieveDelivery, redeliver, listEventTypes |
 | `events` | retrieve, all, autoPagingIterator |
-| `tenant` | capabilities, portalBranding, setPortalBranding, rotateProviderCredential |
+| `tenant` | capabilities, portalBranding, setPortalBranding, billingProfile, setBillingProfile, export, rotateProviderCredential |
 | `coupons` | create, retrieve, update (withdraw with `['active' => false]`), validate, all, autoPagingIterator |
 | `taxRates` | create, retrieve, update (retire with `['active' => false]`), all, autoPagingIterator |
-| `invoices` | retrieve, retrievePdf, all, autoPagingIterator, void |
+| `invoices` | retrieve, retrievePdf, sendEmail, all, autoPagingIterator (filter by `customer_id`, `subscription_id`, `payment_id`, `status`), void |
 | `creditNotes` | retrieve, retrievePdf, all, autoPagingIterator (filter by `invoice_id`, `customer_id`) |
 | `auditLogs` | retrieve, all, autoPagingIterator (filter by `action` / `resource_type` / `resource_id` / `actor_id`) |
-| `payments` | retrieve, all, autoPagingIterator |
+| `payments` | retrieve, retrieveProvider, all, autoPagingIterator (filter by `customer_id`) |
 | `billingPortalSessions` | create, revoke |
+
+### Expanding a relation
+
+Six routes take `?expand=`, which attaches the related object next to the id a
+response already carries, resolved for the whole page in one query. Spell it as
+a list in the params array, or as the second argument on `retrieve()`:
+
+```php
+$page = $client->subscriptions->all(['expand' => ['customer', 'price']]);
+$page['data'][0]['customer']['name'];
+
+$sub = $client->subscriptions->retrieve($id, ['expand' => ['refund_eligibility']]);
+```
+
+What each route accepts: `customers->all()` → `stats`; `products` → `prices`,
+`stats`; `subscriptions` → `customer`, `price`, `refund_eligibility`;
+`payments` → `customer`, `subscription`; `invoices` → `customer`;
+`events->all()` → `customer`. An unknown relation is a `400` naming the ones
+that work, and no other route accepts the parameter at all. An expanded
+relation is a summary for rendering, not the whole resource, and one that has
+since been purged expands to `null` rather than failing the page.
+
+### When `null` means "clear this"
+
+`null` values are stripped from a request body, with two deliberate exceptions
+where the API reads an explicit null as an erasure: `vat_number` on
+`customers->setVatNumber()`, and the address fields and `registration_number`
+on `tenant->setBillingProfile()`. Leave the key out to keep the stored value;
+pass it as `null` to empty it. Your own `vat_id` is the exception inside that
+call: it can be set once, and changing or clearing it afterwards is refused
+(`vat_id_locked`) because support changes it.
+
+```php
+$client->customers->setVatNumber($id, ['vat_number' => null]);   // deregistered
+$client->tenant->setBillingProfile(['country_code' => 'NL', 'address_line2' => null]);
+```
 
 ### Retiring something, and deleting something
 
@@ -284,7 +325,7 @@ The catalogue is retired through its update route instead, because it stays read
 
 `['status' => 'disabled']` on a webhook endpoint is the other half of the pair, not a substitute for deleting. It stops delivery and keeps the endpoint, its secret and its history, and it can be turned back on.
 
-A price accepts `active` and nothing else, because the amount, currency and interval are fixed at creation. `active` itself moves both ways: it decides what new checkouts may buy, not what anyone was charged.
+A price never accepts `amount_cents`, `currency`, `interval` or `usage_type`, because those decide what a past charge *was* and subscriptions renew against a price by id. What it does accept is forward-looking: `active`, `metadata`, `payment_methods`, `refund_on_cancel`, the two refund windows, and `tax_behavior` — which moves one way only, settable while the price is still `unspecified` and never changed again.
 
 ```php
 // Stop selling a price. It stays readable; customers on it keep renewing.
@@ -384,7 +425,7 @@ Check `will_charge` before you promise a customer an amount. A period whose tota
 
 ### Archiving a price
 
-A price's amount, currency and interval are fixed at creation, so you stop selling one rather than editing it. The price keeps its id and stays readable, because subscriptions renew against it by id. Subscriptions already on it keep renewing at it; what stops is new business. Re-archiving is a no-op, so a retry is safe, and `['active' => true]` puts it back on sale unchanged.
+A price's amount, currency and interval are fixed at creation, so you stop selling one rather than editing it. `update()` takes every forward-looking field (`metadata`, `payment_methods`, `refund_on_cancel`, `refund_window_initial_days`, `refund_window_renewal_days`, `tax_behavior`), all optional; setting `refund_on_cancel` here covers the customers already on the price. The price keeps its id and stays readable, because subscriptions renew against it by id. Subscriptions already on it keep renewing at it; what stops is new business. Re-archiving is a no-op, so a retry is safe, and `['active' => true]` puts it back on sale unchanged.
 
 ```php
 $archived = $client->prices->update($price['id'], ['active' => false]);

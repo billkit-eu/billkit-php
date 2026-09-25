@@ -45,6 +45,6 @@ final class OneShotPayments extends BaseResource
      */
     public function retrieve(string $id): array
     {
-        return $this->get("/v1/checkout/one_shot/{$id}");
+        return $this->get('/v1/checkout/one_shot/' . self::p($id));
     }
 }
