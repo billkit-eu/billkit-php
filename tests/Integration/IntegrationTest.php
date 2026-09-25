@@ -44,6 +44,7 @@ final class IntegrationTest extends TestCase
         'crud.product',
         'crud.price',
         'crud.price_archive',
+        'crud.product_default_price',
         'crud.customer',
         'crud.coupon',
         'crud.tax_rate',
@@ -295,6 +296,50 @@ final class IntegrationTest extends TestCase
         $back = $c->prices->update((string) $price['id'], ['active' => true]);
         self::assertTrue($back['active']);
         self::assertSame(777, $back['amount_cents']);
+    }
+
+    public function testCrudProductDefaultPrice(): void
+    {
+        $c = $this->client();
+        ['product' => $product, 'price' => $first] = $this->makePlan($c, 1000);
+        $productId = (string) $product['id'];
+        $second = $c->prices->create([
+            'product_id' => $productId,
+            'amount_cents' => 1200,
+            'currency' => 'EUR',
+            'interval' => 'month',
+        ]);
+
+        // The first price claims the default; a later one does not.
+        self::assertSame($first['id'], $c->products->retrieve($productId)['default_price_id']);
+
+        $moved = $c->products->update($productId, ['default_price_id' => $second['id']]);
+        self::assertSame($second['id'], $moved['default_price_id']);
+        $expanded = $c->products->retrieve($productId, ['expand' => ['default_price']]);
+        self::assertSame($second['id'], $expanded['default_price']['id']);
+
+        // Leaving the key out leaves the default alone.
+        $renamed = $c->products->update($productId, ['name' => 'Renamed']);
+        self::assertSame($second['id'], $renamed['default_price_id']);
+
+        // A present-and-null key is the clear, so it has to survive the
+        // null-stripping every other key gets.
+        $cleared = $c->products->update($productId, ['default_price_id' => null]);
+        self::assertNull($cleared['default_price_id']);
+
+        // Another product's price is refused on the field.
+        ['price' => $other] = $this->makePlan($c);
+        try {
+            $c->products->update($productId, ['default_price_id' => $other['id']]);
+            self::fail('expected InvalidRequestException');
+        } catch (InvalidRequestException $e) {
+            self::assertSame('default_price_id', $e->param);
+        }
+
+        // Archiving the default price releases it rather than being refused.
+        $c->products->update($productId, ['default_price_id' => $second['id']]);
+        $c->prices->update((string) $second['id'], ['active' => false]);
+        self::assertNull($c->products->retrieve($productId)['default_price_id']);
     }
 
     public function testCrudPriceUpdateFields(): void

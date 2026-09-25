@@ -103,7 +103,7 @@ final class Customers extends BaseResource
      * ``vat_number_validated``.
      *
      * ``['vat_number' => null]`` **clears** the registration and is sent as
-     * an explicit JSON null rather than stripped, which is the one place in
+     * an explicit JSON null rather than stripped, one of the few places in
      * this SDK where a ``null`` in a params array is a value rather than an
      * omission. VIES needs a country, so pass ``country_code`` when the
      * customer does not have one yet; that one is still dropped when null.

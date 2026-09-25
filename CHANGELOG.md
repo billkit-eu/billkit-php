@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versioning is independent of the Node and Python SDKs; each ships on its own
 cadence.
 
+## [0.7.1] - 2026-09-25
+
+### Added
+- **`products->update()` documents `default_price_id`**, the price the billing portal offers on that price's interval. It must be an active price of the same product.
+- `products->retrieve()` and `products->all()` document the `default_price` expansion alongside `prices` and `stats`.
+
+### Fixed
+- **`products->update($id, ['default_price_id' => null])` clears the default.** The null used to be stripped like every other null in a params array, so the clear never reached the API and the call silently left the default in place. A present-and-null `default_price_id` is now sent as an explicit JSON null; an absent key still leaves the default alone, and other null values are still stripped.
+
+### Changed
+- `tenant->setBillingProfile()` documents that the tenant `vat_id` is set once: changing it or clearing it with `null` afterwards throws `InvalidRequestException` (`vat_id_locked` on `vat_id`) and writes nothing, and support changes it. The address fields and `registration_number` still clear with `null`.
+
 ## [0.7.0] - 2026-09-23
 
 ### Fixed
@@ -251,7 +263,9 @@ First public release.
   is what lets Monolog, Laravel's `Log` channel and Symfony's logger all drop
   straight in.
 
-[Unreleased]: https://github.com/billkit-eu/billkit-php/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/billkit-eu/billkit-php/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/billkit-eu/billkit-php/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/billkit-eu/billkit-php/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/billkit-eu/billkit-php/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/billkit-eu/billkit-php/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/billkit-eu/billkit-php/compare/v0.3.0...v0.4.0

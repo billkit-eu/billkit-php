@@ -26,7 +26,8 @@ final class Products extends BaseResource
      *
      * ``['expand' => ['prices']]`` attaches every price on the product
      * (archived ones too, active first); ``'stats'`` attaches the live
-     * subscriber and revenue counts. Those two are the only relations this
+     * subscriber and revenue counts; ``'default_price'`` attaches the price
+     * ``default_price_id`` names. Those three are the only relations this
      * route expands.
      *
      * @param array<string, scalar|list<string>|null> $params ``expand`` only
@@ -46,21 +47,37 @@ final class Products extends BaseResource
      * and stays readable, because what was sold under it has to be, which
      * is why there is no delete. `['active' => true]` un-archives.
      *
+     * ``default_price_id`` names the price the billing portal offers on
+     * that price's interval. It must be an active price of this product;
+     * anything else throws {@see \BillKit\Exception\InvalidRequestException}
+     * on ``default_price_id``. Unlike every other key here, a ``null``
+     * ``default_price_id`` is a value, not an omission:
+     * ``['default_price_id' => null]`` is sent as an explicit JSON null and
+     * **clears** the default. Leave the key out to keep the default as it
+     * is. Other ``null`` values are still stripped.
+     *
      * @param array<string, mixed> $params
      *
      * @return array<string, mixed>
      */
     public function update(string $id, array $params): array
     {
-        return $this->post('/v1/products/' . self::p($id), $params);
+        [$body, $idempotencyKey] = $this->splitIdempotency($params);
+        // array_key_exists, not isset: an explicit null is the clear.
+        if (array_key_exists('default_price_id', $params)) {
+            $body['default_price_id'] = $params['default_price_id'];
+        }
+
+        return $this->postFixed('/v1/products/' . self::p($id), $body, $idempotencyKey);
     }
 
     /**
      * List one page of products. Use {@see self::autoPagingIterator()} to
      * walk every page.
      *
-     * ``['expand' => ['prices', 'stats']]`` is accepted here too, and is
-     * resolved for the whole page in one query rather than per row.
+     * ``['expand' => ['prices', 'stats', 'default_price']]`` is accepted
+     * here too, and is resolved for the whole page in one query rather
+     * than per row.
      *
      * @param array<string, scalar|list<string>|null> $params
      *

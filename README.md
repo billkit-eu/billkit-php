@@ -295,7 +295,7 @@ $sub = $client->subscriptions->retrieve($id, ['expand' => ['refund_eligibility']
 ```
 
 What each route accepts: `customers->all()` → `stats`; `products` → `prices`,
-`stats`; `subscriptions` → `customer`, `price`, `refund_eligibility`;
+`stats`, `default_price`; `subscriptions` → `customer`, `price`, `refund_eligibility`;
 `payments` → `customer`, `subscription`; `invoices` → `customer`;
 `events->all()` → `customer`. An unknown relation is a `400` naming the ones
 that work, and no other route accepts the parameter at all. An expanded
@@ -304,10 +304,10 @@ since been purged expands to `null` rather than failing the page.
 
 ### When `null` means "clear this"
 
-`null` values are stripped from a request body, with two deliberate exceptions
+`null` values are stripped from a request body, with three deliberate exceptions
 where the API reads an explicit null as an erasure: `vat_number` on
-`customers->setVatNumber()`, and the address fields and `registration_number`
-on `tenant->setBillingProfile()`. Leave the key out to keep the stored value;
+`customers->setVatNumber()`, the address fields and `registration_number` on
+`tenant->setBillingProfile()`, and `default_price_id` on `products->update()`. Leave the key out to keep the stored value;
 pass it as `null` to empty it. Your own `vat_id` is the exception inside that
 call: it can be set once, and changing or clearing it afterwards is refused
 (`vat_id_locked`) because support changes it.
@@ -315,6 +315,7 @@ call: it can be set once, and changing or clearing it afterwards is refused
 ```php
 $client->customers->setVatNumber($id, ['vat_number' => null]);   // deregistered
 $client->tenant->setBillingProfile(['country_code' => 'NL', 'address_line2' => null]);
+$client->products->update($productId, ['default_price_id' => null]); // portal falls back to the newest price
 ```
 
 ### Retiring something, and deleting something

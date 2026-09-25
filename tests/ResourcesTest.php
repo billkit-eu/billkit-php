@@ -861,6 +861,39 @@ final class ResourcesTest extends BillKitTestCase
         self::assertSame('{"country_code":"NL","vat_id":null,"city":"Amsterdam"}', (string) $req->getBody());
     }
 
+    public function testProductUpdateDefaultPriceIdSetClearAndOmit(): void
+    {
+        $http = (new MockHttpClient())
+            ->stage(200, ['id' => 'prod_1'])
+            ->stage(200, ['id' => 'prod_1'])
+            ->stage(200, ['id' => 'prod_1']);
+        $client = $this->makeClient($http);
+
+        $client->products->update('prod_1', ['default_price_id' => 'price_2', 'idempotency_key' => 'dp-1']);
+        $req = $http->lastRequest();
+        self::assertSame(self::BASE_URL . '/v1/products/prod_1', $this->url($req));
+        self::assertSame('{"default_price_id":"price_2"}', (string) $req->getBody());
+        self::assertSame('dp-1', $req->getHeaderLine('Idempotency-Key'));
+
+        // Present-and-null is the clear, so it survives the null-stripping
+        // every other key gets.
+        $client->products->update('prod_1', ['default_price_id' => null, 'description' => null]);
+        self::assertSame('{"default_price_id":null}', (string) $http->lastRequest()->getBody());
+
+        // Absent leaves the default alone: the key is not sent at all.
+        $client->products->update('prod_1', ['name' => 'Pro']);
+        self::assertSame('{"name":"Pro"}', (string) $http->lastRequest()->getBody());
+    }
+
+    public function testProductRetrieveExpandsDefaultPrice(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['id' => 'prod_1', 'default_price' => ['id' => 'price_2']]);
+        $product = $this->makeClient($http)->products->retrieve('prod_1', ['expand' => ['default_price']]);
+
+        self::assertSame('price_2', $product['default_price']['id']);
+        self::assertSame('expand=default_price', $http->lastRequest()->getUri()->getQuery());
+    }
+
     public function testTenantExportUsesTheBinaryPath(): void
     {
         $http = (new MockHttpClient())->stage(200, '{"billkit_export_version":2}');

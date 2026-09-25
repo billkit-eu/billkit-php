@@ -70,7 +70,7 @@ final class Tenant extends BaseResource
      * is domestic, cross-border within the EU, or outside it.
      *
      * The address fields and ``registration_number`` are partial-update,
-     * and this is one of the two places in the SDK where a ``null`` is a
+     * and this is one of the places in the SDK where a ``null`` is a
      * value rather than an omission: leave a key out and the stored value
      * is untouched, pass it as ``null`` and it is **cleared**. Moving
      * office is a real event, so an address that could be set once and
