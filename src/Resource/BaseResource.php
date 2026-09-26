@@ -83,6 +83,31 @@ abstract class BaseResource
     }
 
     /**
+     * POST an update where a ``null`` on the named keys is a value: the
+     * explicit JSON null that clears the field server-side.
+     *
+     * Every other ``null`` is still stripped, as {@see self::post()} does.
+     * ``array_key_exists``, not ``isset``, is the point: a present-and-null
+     * key clears, an absent key leaves the stored value alone.
+     *
+     * @param array<string, mixed> $params
+     * @param list<string>         $clearable
+     *
+     * @return array<string, mixed>
+     */
+    protected function postClearable(string $path, array $params, array $clearable): array
+    {
+        [$body, $idempotencyKey] = $this->splitIdempotency($params);
+        foreach ($clearable as $key) {
+            if (array_key_exists($key, $params)) {
+                $body[$key] = $params[$key];
+            }
+        }
+
+        return $this->postFixed($path, $body, $idempotencyKey);
+    }
+
+    /**
      * @return array<string, mixed>
      */
     protected function del(string $path, ?string $idempotencyKey = null): array

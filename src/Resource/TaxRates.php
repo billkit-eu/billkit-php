@@ -34,13 +34,17 @@ final class TaxRates extends BaseResource
     /**
      * Patch mutable fields on a tax rate.
      *
+     * ``['display_name' => null]`` is sent as an explicit JSON null and
+     * removes the display name; leave the key out to keep it. Other
+     * ``null`` values are stripped.
+     *
      * @param array<string, mixed> $params
      *
      * @return array<string, mixed>
      */
     public function update(string $id, array $params): array
     {
-        return $this->post('/v1/tax_rates/' . self::p($id), $params);
+        return $this->postClearable('/v1/tax_rates/' . self::p($id), $params, ['display_name']);
     }
 
     /**

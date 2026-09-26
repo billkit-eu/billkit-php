@@ -53,13 +53,17 @@ final class WebhookEndpoints extends BaseResource
      * Use {@see self::delete()} when the endpoint should not exist at
      * all: disabling is reversible and deleting is not.
      *
+     * ``['description' => null]`` is sent as an explicit JSON null and
+     * removes the description; leave the key out to keep it. Other
+     * ``null`` values are stripped.
+     *
      * @param array<string, mixed> $params
      *
      * @return array<string, mixed>
      */
     public function update(string $id, array $params): array
     {
-        return $this->post('/v1/webhook_endpoints/' . self::p($id), $params);
+        return $this->postClearable('/v1/webhook_endpoints/' . self::p($id), $params, ['description']);
     }
 
     /**

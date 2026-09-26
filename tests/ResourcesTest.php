@@ -876,13 +876,101 @@ final class ResourcesTest extends BillKitTestCase
         self::assertSame('dp-1', $req->getHeaderLine('Idempotency-Key'));
 
         // Present-and-null is the clear, so it survives the null-stripping
-        // every other key gets.
-        $client->products->update('prod_1', ['default_price_id' => null, 'description' => null]);
-        self::assertSame('{"default_price_id":null}', (string) $http->lastRequest()->getBody());
+        // every other key gets. ``description`` clears the same way; any
+        // other null (``name`` here) is still stripped.
+        $client->products->update('prod_1', ['default_price_id' => null, 'description' => null, 'name' => null]);
+        self::assertSame(
+            '{"default_price_id":null,"description":null}',
+            (string) $http->lastRequest()->getBody(),
+        );
 
         // Absent leaves the default alone: the key is not sent at all.
         $client->products->update('prod_1', ['name' => 'Pro']);
         self::assertSame('{"name":"Pro"}', (string) $http->lastRequest()->getBody());
+    }
+
+    /**
+     * @return iterable<string, array{string, string, string, list<string>}>
+     */
+    public static function clearableFields(): iterable
+    {
+        // The last two values are another field that endpoint's (strict)
+        // update schema accepts, used for the "absent is not sent" half.
+        yield 'customer name' => ['customers', 'cus_1', '/v1/customers/cus_1', ['name'], 'email', 'a@example.com'];
+        yield 'webhook endpoint description' => [
+            'webhookEndpoints', 'we_1', '/v1/webhook_endpoints/we_1', ['description'], 'status', 'disabled',
+        ];
+        yield 'coupon cap and expiry' => [
+            'coupons', 'co_1', '/v1/coupons/co_1', ['max_redemptions', 'redeem_by'], 'active', false,
+        ];
+        yield 'tax rate display name' => [
+            'taxRates', 'txr_1', '/v1/tax_rates/txr_1', ['display_name'], 'rate_basis_points', 2100,
+        ];
+    }
+
+    /**
+     * @param list<string> $keys
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('clearableFields')]
+    public function testUpdateSendsAnExplicitNullToClear(
+        string $resource,
+        string $id,
+        string $path,
+        array $keys,
+        string $otherKey,
+        mixed $otherValue,
+    ): void {
+        $http = (new MockHttpClient())->stage(200, ['id' => $id])->stage(200, ['id' => $id]);
+        $client = $this->makeClient($http);
+
+        $clear = array_fill_keys($keys, null);
+        $client->{$resource}->update($id, $clear + [$otherKey => null]);
+        $req = $http->lastRequest();
+        self::assertSame(self::BASE_URL . $path, $this->url($req));
+        // Present-and-null reaches the API as a JSON null; the unrelated
+        // null is still stripped.
+        self::assertSame(json_encode($clear), (string) $req->getBody());
+
+        // Absent leaves the stored value alone: the key is not sent.
+        $client->{$resource}->update($id, [$otherKey => $otherValue]);
+        self::assertSame(json_encode([$otherKey => $otherValue]), (string) $http->lastRequest()->getBody());
+    }
+
+    public function testOneShotListAndIteratorCarryTheFilters(): void
+    {
+        $http = (new MockHttpClient())
+            ->stage(200, ['object' => 'list', 'data' => [], 'has_more' => false])
+            ->stage(200, ['object' => 'list', 'data' => [['id' => 'osp_1']], 'has_more' => true])
+            ->stage(200, ['object' => 'list', 'data' => [['id' => 'osp_2']], 'has_more' => false]);
+        $client = $this->makeClient($http);
+
+        $client->oneShotPayments->all(['customer_id' => 'cus_1', 'status' => 'paid', 'limit' => 5]);
+        $req = $http->lastRequest();
+        self::assertSame('/v1/checkout/one_shot', $req->getUri()->getPath());
+        self::assertSame('customer_id=cus_1&status=paid&limit=5', $req->getUri()->getQuery());
+
+        $ids = [];
+        foreach ($client->oneShotPayments->autoPagingIterator(1, 'cus_1', 'paid') as $row) {
+            $ids[] = $row['id'];
+        }
+        self::assertSame(['osp_1', 'osp_2'], $ids);
+        parse_str($http->lastRequest()->getUri()->getQuery(), $q);
+        self::assertSame(
+            ['customer_id' => 'cus_1', 'status' => 'paid', 'limit' => '1', 'starting_after' => 'osp_1'],
+            $q,
+        );
+    }
+
+    public function testPaymentRetrieveExpandsRefundEligibility(): void
+    {
+        $http = (new MockHttpClient())->stage(200, [
+            'id' => 'pay_1',
+            'refund_eligibility' => ['object' => 'refund_eligibility', 'eligible' => true, 'amount_cents' => 999],
+        ]);
+        $payment = $this->makeClient($http)->payments->retrieve('pay_1', ['expand' => ['refund_eligibility']]);
+
+        self::assertTrue($payment['refund_eligibility']['eligible']);
+        self::assertSame('expand=refund_eligibility', $http->lastRequest()->getUri()->getQuery());
     }
 
     public function testProductRetrieveExpandsDefaultPrice(): void

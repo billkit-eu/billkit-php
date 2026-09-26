@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versioning is independent of the Node and Python SDKs; each ships on its own
 cadence.
 
+## [Unreleased]
+
+## [0.8.0] - 2026-09-26
+
+### Added
+- `oneShotPayments->all()` and `oneShotPayments->autoPagingIterator()` for `GET /v1/checkout/one_shot`, newest first, filtered by `customer_id` and `status`. The iterator carries both filters onto every page.
+- `payments->retrieve()` documents the `refund_eligibility` expansion: whether a refund of the remaining balance would succeed now, with `eligible`, `amount_cents`, `currency`, `days_remaining`, `window_ends_at` and a `reason` (`not_paid`, `unrefundable_type`, `window_expired`, `fully_refunded`, `disputed`, `operation_pending`, `plan_change_pending`) when it would not. Retrieve only; `payments->all()` refuses it.
+
+### Changed
+- An explicit `null` now clears `description` on `products->update()`, `name` on `customers->update()`, `description` on `webhookEndpoints->update()`, `max_redemptions` and `redeem_by` on `coupons->update()`, and `display_name` on `taxRates->update()`. The null used to be stripped like every other null in a params array, so the clear never reached the API. An absent key still leaves the stored value alone, and other null values are still stripped.
+  **Upgrade note:** a `null` you pass through from your own data now clears the field. `['name' => $user->name]` with `$user->name` sometimes `null` used to leave the name alone and now erases it; leave the key out when you mean "leave it".
+
 ## [0.7.1] - 2026-09-25
 
 ### Added
@@ -263,7 +275,8 @@ First public release.
   is what lets Monolog, Laravel's `Log` channel and Symfony's logger all drop
   straight in.
 
-[Unreleased]: https://github.com/billkit-eu/billkit-php/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/billkit-eu/billkit-php/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/billkit-eu/billkit-php/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/billkit-eu/billkit-php/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/billkit-eu/billkit-php/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/billkit-eu/billkit-php/compare/v0.5.0...v0.6.0

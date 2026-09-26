@@ -54,6 +54,9 @@ final class IntegrationTest extends TestCase
         'crud.price_update_fields',
         'crud.coupon_discount_type_literals',
         'crud.credit_note_absent_until_refunded',
+        'crud.nullable_fields_clear',
+        'routes.one_shot_list',
+        'money.payment_refund_eligibility',
         'filters.subscription_renewal_state',
         'filters.customer_provisional',
         'filters.audit_resource_id',
@@ -340,6 +343,69 @@ final class IntegrationTest extends TestCase
         $c->products->update($productId, ['default_price_id' => $second['id']]);
         $c->prices->update((string) $second['id'], ['active' => false]);
         self::assertNull($c->products->retrieve($productId)['default_price_id']);
+    }
+
+    /**
+     * Six optional fields clear with a present-and-null key. Each goes
+     * through the same array_key_exists path as `default_price_id`, so a
+     * regression to plain null-stripping would send an empty body the API
+     * reads as "change nothing".
+     */
+    public function testCrudNullableFieldsClear(): void
+    {
+        // A tenant of its own, so the tax rate cannot collide with another
+        // test's rate for the same country.
+        $c = $this->client(IntegrationHarness::provisionTenant('nullable-clears')['api_key']);
+
+        $product = $c->products->create(['name' => 'Clearable', 'description' => 'Long form']);
+        $productId = (string) $product['id'];
+        self::assertSame('Long form', $c->products->update($productId, ['name' => 'Renamed'])['description']);
+        self::assertNull($c->products->update($productId, ['description' => null])['description']);
+
+        $customer = $c->customers->create([
+            'email' => 'clear-' . IntegrationHarness::idemKey() . '@sdk-it.example.com',
+            'name' => 'Ada Lovelace',
+        ]);
+        $customerId = (string) $customer['id'];
+        self::assertSame('Ada Lovelace', $c->customers->update($customerId, ['metadata' => ['k' => 'v']])['name']);
+        self::assertNull($c->customers->update($customerId, ['name' => null])['name']);
+
+        $endpoint = $c->webhookEndpoints->create([
+            'url' => 'https://merchant.example.com/hooks/clear',
+            'enabled_events' => ['*'],
+            'description' => 'to be cleared',
+        ]);
+        $endpointId = (string) $endpoint['id'];
+        self::assertSame(
+            'to be cleared',
+            $c->webhookEndpoints->update($endpointId, ['enabled_events' => ['*']])['description'],
+        );
+        self::assertNull($c->webhookEndpoints->update($endpointId, ['description' => null])['description']);
+
+        $coupon = $c->coupons->create([
+            'code' => 'CLEAR' . substr((string) time(), -8),
+            'discount_type' => 'percent',
+            'discount_value' => 10,
+            'duration' => 'once',
+            'max_redemptions' => 5,
+            'redeem_by' => time() + 86400 * 30,
+        ]);
+        $couponId = (string) $coupon['id'];
+        $kept = $c->coupons->update($couponId, ['min_amount_cents' => 100]);
+        self::assertSame(5, $kept['max_redemptions']);
+        self::assertNotNull($kept['redeem_by']);
+        $cleared = $c->coupons->update($couponId, ['max_redemptions' => null, 'redeem_by' => null]);
+        self::assertNull($cleared['max_redemptions']);
+        self::assertNull($cleared['redeem_by']);
+
+        $rate = $c->taxRates->create([
+            'country_code' => 'BE',
+            'rate_basis_points' => 2100,
+            'display_name' => 'BE VAT',
+        ]);
+        $rateId = (string) $rate['id'];
+        self::assertSame('BE VAT', $c->taxRates->update($rateId, ['rate_basis_points' => 2100])['display_name']);
+        self::assertNull($c->taxRates->update($rateId, ['display_name' => null])['display_name']);
     }
 
     public function testCrudPriceUpdateFields(): void
@@ -770,8 +836,10 @@ final class IntegrationTest extends TestCase
 
     public function testRoutesTenantBillingProfile(): void
     {
+        // A live-mode key: the billing profile is shared by both modes, so a
+        // test-mode key may not write it.
         $c = new BillKitClient(
-            apiKey: IntegrationHarness::provisionTenant('billing-profile')['api_key'],
+            apiKey: IntegrationHarness::provisionTenant('billing-profile', 'live')['api_key'],
             baseUrl: IntegrationHarness::baseUrl(),
         );
 
@@ -1066,6 +1134,31 @@ final class IntegrationTest extends TestCase
         $after = $c->payments->retrieve((string) $payment['id']);
         self::assertSame(3000, $after['amount_refunded_cents']);
         self::assertSame(7000, $after['amount_refundable_cents']);
+    }
+
+    public function testMoneyPaymentRefundEligibility(): void
+    {
+        $c = $this->client();
+        $price = $this->makePlan($c, 10000)['price'];
+        $this->checkoutToActive($c, (string) $price['id']);
+        $sub = $this->findSubscription($c, (string) $price['id']);
+        $paymentId = (string) $this->findPayment($c, (string) $sub['id'])['id'];
+
+        $fresh = $c->payments->retrieve($paymentId, ['expand' => ['refund_eligibility']])['refund_eligibility'];
+        self::assertSame('refund_eligibility', $fresh['object']);
+        self::assertTrue($fresh['eligible']);
+        self::assertSame(10000, $fresh['amount_cents']);
+        self::assertIsInt($fresh['window_ends_at']);
+        self::assertNull($fresh['reason']);
+
+        $c->refunds->create(['payment_id' => $paymentId, 'amount_cents' => 3000]);
+        $after = $c->payments->retrieve($paymentId, ['expand' => ['refund_eligibility']])['refund_eligibility'];
+        self::assertTrue($after['eligible']);
+        self::assertSame(7000, $after['amount_cents']);
+
+        // Retrieve-only: a list page would pay one query per row for it.
+        $this->expectException(InvalidRequestException::class);
+        $c->payments->all(['expand' => ['refund_eligibility']]);
     }
 
     public function testMoneyOverRefundRejected(): void
@@ -1368,8 +1461,10 @@ final class IntegrationTest extends TestCase
     private const MANDATE_CREATING_METHODS = ['creditcard', 'ideal', 'eps', 'applepay', 'paypal'];
 
     /** Everything a single `sequenceType=oneoff` charge may use. */
+    // Not directdebit: SEPA only collects over a mandate another method
+    // minted, so the API refuses it on a one-off (asserted with giropay).
     private const ONE_SHOT_METHODS = [
-        'creditcard', 'directdebit', 'ideal', 'eps', 'applepay', 'paypal',
+        'creditcard', 'ideal', 'eps', 'applepay', 'paypal',
         'bancontact', 'banktransfer',
     ];
 
@@ -1449,8 +1544,14 @@ final class IntegrationTest extends TestCase
             self::assertNotEmpty($charge['id'], "{$method} should take a one-off charge");
         }
 
-        $this->expectException(InvalidRequestException::class);
-        $this->oneShot($c, 'giropay');
+        foreach (['directdebit', 'giropay'] as $method) {
+            try {
+                $this->oneShot($c, $method);
+                self::fail("{$method} must not take a one-off charge");
+            } catch (InvalidRequestException) {
+                // Refused, as the contract says.
+            }
+        }
     }
 
     /**
@@ -1472,6 +1573,37 @@ final class IntegrationTest extends TestCase
         self::assertGreaterThan($card['expires_at'], $transfer['expires_at']);
         $days = ($transfer['expires_at'] - time()) / 86400;
         self::assertGreaterThan(5, $days, 'a bank transfer stays open for days, not minutes');
+    }
+
+    public function testRoutesOneShotList(): void
+    {
+        $t = IntegrationHarness::provisionTenant('one-shot-list');
+        $c = $this->client($t['api_key']);
+        $buyer = $this->methodBuyer($c);
+        $make = fn (): array => $c->oneShotPayments->create([
+            'customer_id' => $buyer['id'],
+            'amount_cents' => 2500,
+            'currency' => 'EUR',
+            'method' => 'creditcard',
+            'success_url' => 'https://merchant.example.com/ok',
+        ]);
+        $first = $make();
+        $second = $make();
+        // Another buyer's charge must not leak into the filtered page.
+        $this->oneShot($c, 'creditcard');
+
+        $page = $c->oneShotPayments->all(['customer_id' => $buyer['id']]);
+        self::assertSame([$second['id'], $first['id']], array_column($page['data'], 'id'));
+
+        $status = (string) $first['status'];
+        $byStatus = $c->oneShotPayments->all(['customer_id' => $buyer['id'], 'status' => $status]);
+        self::assertContains($first['id'], array_column($byStatus['data'], 'id'));
+        foreach ($byStatus['data'] as $row) {
+            self::assertSame($status, $row['status']);
+        }
+
+        $this->expectException(InvalidRequestException::class);
+        $c->oneShotPayments->all(['status' => 'settled']);
     }
 
     /** @return array<string, mixed> */

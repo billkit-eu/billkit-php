@@ -266,7 +266,7 @@ page) and `autoPagingIterator()` (walk all pages).
 | `products` | create, retrieve, update (archive with `['active' => false]`), all, autoPagingIterator |
 | `prices` | create, retrieve, update (archive with `['active' => false]`), all, autoPagingIterator (filter by `product_id`) |
 | `checkoutSessions` | create, retrieve |
-| `oneShotPayments` | create, retrieve |
+| `oneShotPayments` | create, retrieve, all, autoPagingIterator (filter by `customer_id` / `status`) |
 | `subscriptions` | retrieve, all, autoPagingIterator (filter by `customer_id`, `status`, `renewal_state`), cancel, pause, resume, reactivate, previewUpdate, update, reauthorizePaymentMethod, createUsageRecord, listUsageRecords, autoPagingIteratorUsageRecords, retrieveUsageSummary |
 | `refunds` | create, retrieve, all, autoPagingIterator |
 | `disputes` | retrieve, all, autoPagingIterator (filter by `status`, `payment_id`) |
@@ -292,11 +292,12 @@ $page = $client->subscriptions->all(['expand' => ['customer', 'price']]);
 $page['data'][0]['customer']['name'];
 
 $sub = $client->subscriptions->retrieve($id, ['expand' => ['refund_eligibility']]);
+$pay = $client->payments->retrieve($paymentId, ['expand' => ['refund_eligibility']]);
 ```
 
 What each route accepts: `customers->all()` → `stats`; `products` → `prices`,
 `stats`, `default_price`; `subscriptions` → `customer`, `price`, `refund_eligibility`;
-`payments` → `customer`, `subscription`; `invoices` → `customer`;
+`payments` → `customer`, `subscription`, `refund_eligibility` (retrieve only); `invoices` → `customer`;
 `events->all()` → `customer`. An unknown relation is a `400` naming the ones
 that work, and no other route accepts the parameter at all. An expanded
 relation is a summary for rendering, not the whole resource, and one that has
@@ -304,10 +305,13 @@ since been purged expands to `null` rather than failing the page.
 
 ### When `null` means "clear this"
 
-`null` values are stripped from a request body, with three deliberate exceptions
+`null` values are stripped from a request body, with a few deliberate exceptions
 where the API reads an explicit null as an erasure: `vat_number` on
 `customers->setVatNumber()`, the address fields and `registration_number` on
-`tenant->setBillingProfile()`, and `default_price_id` on `products->update()`. Leave the key out to keep the stored value;
+`tenant->setBillingProfile()`, `default_price_id` and `description` on `products->update()`,
+`name` on `customers->update()`, `description` on `webhookEndpoints->update()`,
+`max_redemptions` and `redeem_by` on `coupons->update()`, and `display_name` on
+`taxRates->update()`. Leave the key out to keep the stored value;
 pass it as `null` to empty it. Your own `vat_id` is the exception inside that
 call: it can be set once, and changing or clearing it afterwards is refused
 (`vat_id_locked`) because support changes it.
@@ -316,6 +320,7 @@ call: it can be set once, and changing or clearing it afterwards is refused
 $client->customers->setVatNumber($id, ['vat_number' => null]);   // deregistered
 $client->tenant->setBillingProfile(['country_code' => 'NL', 'address_line2' => null]);
 $client->products->update($productId, ['default_price_id' => null]); // portal falls back to the newest price
+$client->coupons->update($couponId, ['max_redemptions' => null]); // no redemption cap
 ```
 
 ### Retiring something, and deleting something

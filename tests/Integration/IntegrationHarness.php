@@ -47,14 +47,18 @@ final class IntegrationHarness
      * tenant. List assertions ("exactly the 7 products I created") are only
      * stable under that isolation.
      *
+     * `$mode = 'live'` returns a live-mode key, which the tenant-level
+     * settings (billing profile, portal branding) require: live traffic
+     * reads them.
+     *
      * @return array{api_key: string, tenant_id: string, mollie_route_id: string, session_token: string}
      */
-    public static function provisionTenant(string $label = 'php-sdk-it'): array
+    public static function provisionTenant(string $label = 'php-sdk-it', string $mode = 'test'): array
     {
         $email = sprintf('%s-%s@sdk-it.example.com', $label, bin2hex(random_bytes(12)));
         [$status, $body] = self::postJson('/v1/console/auth/_test/login', [
             'email' => $email,
-            'mode' => 'test',
+            'mode' => $mode,
             'tenant_name' => "Php SDK IT {$label}",
         ]);
         if ($status === 404) {

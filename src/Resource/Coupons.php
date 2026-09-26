@@ -39,13 +39,18 @@ final class Coupons extends BaseResource
     /**
      * Patch mutable fields on a coupon.
      *
+     * ``['max_redemptions' => null]`` removes the redemption cap and
+     * ``['redeem_by' => null]`` removes the expiry: both are sent as an
+     * explicit JSON null. Leave a key out to keep the stored value. Other
+     * ``null`` values are stripped.
+     *
      * @param array<string, mixed> $params
      *
      * @return array<string, mixed>
      */
     public function update(string $id, array $params): array
     {
-        return $this->post('/v1/coupons/' . self::p($id), $params);
+        return $this->postClearable('/v1/coupons/' . self::p($id), $params, ['max_redemptions', 'redeem_by']);
     }
 
     /**

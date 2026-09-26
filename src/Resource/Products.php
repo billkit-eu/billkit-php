@@ -50,11 +50,12 @@ final class Products extends BaseResource
      * ``default_price_id`` names the price the billing portal offers on
      * that price's interval. It must be an active price of this product;
      * anything else throws {@see \BillKit\Exception\InvalidRequestException}
-     * on ``default_price_id``. Unlike every other key here, a ``null``
-     * ``default_price_id`` is a value, not an omission:
+     * on ``default_price_id``. Unlike the other keys here, a ``null``
+     * ``default_price_id`` or ``description`` is a value, not an omission:
      * ``['default_price_id' => null]`` is sent as an explicit JSON null and
-     * **clears** the default. Leave the key out to keep the default as it
-     * is. Other ``null`` values are still stripped.
+     * **clears** the default, and ``['description' => null]`` removes the
+     * description. Leave the key out to keep the stored value. Other
+     * ``null`` values are still stripped.
      *
      * @param array<string, mixed> $params
      *
@@ -62,13 +63,11 @@ final class Products extends BaseResource
      */
     public function update(string $id, array $params): array
     {
-        [$body, $idempotencyKey] = $this->splitIdempotency($params);
-        // array_key_exists, not isset: an explicit null is the clear.
-        if (array_key_exists('default_price_id', $params)) {
-            $body['default_price_id'] = $params['default_price_id'];
-        }
-
-        return $this->postFixed('/v1/products/' . self::p($id), $body, $idempotencyKey);
+        return $this->postClearable(
+            '/v1/products/' . self::p($id),
+            $params,
+            ['default_price_id', 'description'],
+        );
     }
 
     /**

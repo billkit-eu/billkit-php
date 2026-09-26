@@ -18,8 +18,20 @@ final class Payments extends BaseResource
      * Fetch a single payment by id.
      *
      * ``['expand' => ['customer', 'subscription']]`` attaches the buyer and
-     * the subscription this charge belongs to. Those two are the only
-     * relations this route expands.
+     * the subscription this charge belongs to.
+     *
+     * ``['expand' => ['refund_eligibility']]`` attaches whether a refund of
+     * the remaining balance would succeed now, applying the refund window
+     * and the price's refund policy, which ``amount_refundable_cents`` does
+     * not: ``['object' => 'refund_eligibility', 'eligible', 'amount_cents',
+     * 'currency', 'days_remaining', 'window_ends_at', 'reason']``. When not
+     * eligible, ``reason`` is ``not_paid``, ``unrefundable_type``,
+     * ``window_expired``, ``fully_refunded``, ``disputed`` (an open
+     * chargeback took the balance), ``operation_pending`` (another refund
+     * is still being confirmed) or ``plan_change_pending`` (a plan change is
+     * settling: the full balance cannot be refunded yet, a partial refund
+     * still can). Treat any other reason as "not refundable". This relation is retrieve-only: {@see self::all()}
+     * refuses it with an {@see \BillKit\Exception\InvalidRequestException}.
      *
      * @param array<string, scalar|list<string>|null> $params ``expand`` only
      *
