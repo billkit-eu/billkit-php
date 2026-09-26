@@ -900,8 +900,16 @@ final class ResourcesTest extends BillKitTestCase
         yield 'webhook endpoint description' => [
             'webhookEndpoints', 'we_1', '/v1/webhook_endpoints/we_1', ['description'], 'status', 'disabled',
         ];
-        yield 'coupon cap and expiry' => [
-            'coupons', 'co_1', '/v1/coupons/co_1', ['max_redemptions', 'redeem_by'], 'active', false,
+        yield 'coupon cap, expiry, price restriction and minimum' => [
+            'coupons', 'co_1', '/v1/coupons/co_1',
+            ['max_redemptions', 'redeem_by', 'applies_to_price_ids', 'min_amount_cents'], 'active', false,
+        ];
+        yield 'product marketing features' => [
+            'products', 'prod_1', '/v1/products/prod_1', ['marketing_features'], 'allow_promotion_codes', true,
+        ];
+        yield 'price refund windows' => [
+            'prices', 'price_1', '/v1/prices/price_1',
+            ['refund_window_initial_days', 'refund_window_renewal_days'], 'refund_on_cancel', 'full',
         ];
         yield 'tax rate display name' => [
             'taxRates', 'txr_1', '/v1/tax_rates/txr_1', ['display_name'], 'rate_basis_points', 2100,
@@ -934,6 +942,71 @@ final class ResourcesTest extends BillKitTestCase
         // Absent leaves the stored value alone: the key is not sent.
         $client->{$resource}->update($id, [$otherKey => $otherValue]);
         self::assertSame(json_encode([$otherKey => $otherValue]), (string) $http->lastRequest()->getBody());
+    }
+
+    /**
+     * Every update field, split into what the API clears on an explicit null
+     * and what it refuses one on (``NotClearable`` in the API's schemas).
+     *
+     * @return iterable<string, array{string, string, list<string>, list<string>}>
+     */
+    public static function updateFieldsByNullSemantics(): iterable
+    {
+        yield 'customers' => [
+            'customers', '/v1/customers/cus_1', ['name'], ['email', 'country_code', 'metadata'],
+        ];
+        yield 'products' => [
+            'products', '/v1/products/prod_1',
+            ['description', 'marketing_features', 'default_price_id'],
+            ['name', 'metadata', 'active', 'allow_promotion_codes'],
+        ];
+        yield 'prices' => [
+            'prices', '/v1/prices/price_1',
+            ['refund_window_initial_days', 'refund_window_renewal_days'],
+            ['active', 'metadata', 'tax_behavior', 'payment_methods', 'refund_on_cancel'],
+        ];
+        yield 'coupons' => [
+            'coupons', '/v1/coupons/co_1',
+            ['max_redemptions', 'redeem_by', 'applies_to_price_ids', 'min_amount_cents'],
+            ['active'],
+        ];
+        yield 'tax rates' => [
+            'taxRates', '/v1/tax_rates/txr_1', ['display_name'], ['rate_basis_points', 'inclusive', 'active'],
+        ];
+        yield 'webhook endpoints' => [
+            'webhookEndpoints', '/v1/webhook_endpoints/we_1',
+            ['description'], ['url', 'enabled_events', 'status'],
+        ];
+    }
+
+    /**
+     * Pins each resource's clearable list exactly: with every field null,
+     * the body holds the clearable ones and nothing else. A refused field
+     * slipping into a ``postClearable`` list would send a null the API
+     * answers with a 400; a clearable one dropping out would never clear.
+     *
+     * @param list<string> $clearable
+     * @param list<string> $refused
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('updateFieldsByNullSemantics')]
+    public function testOnlyClearableFieldsSendNull(
+        string $resource,
+        string $path,
+        array $clearable,
+        array $refused,
+    ): void {
+        $http = (new MockHttpClient())->stage(200, ['id' => 'x']);
+        $client = $this->makeClient($http);
+
+        $client->{$resource}->update(basename($path), array_fill_keys([...$clearable, ...$refused], null));
+        $req = $http->lastRequest();
+        self::assertSame(self::BASE_URL . $path, $this->url($req));
+        $sent = json_decode((string) $req->getBody(), true);
+        self::assertIsArray($sent);
+        $expected = array_fill_keys($clearable, null);
+        ksort($sent);
+        ksort($expected);
+        self::assertSame($expected, $sent);
     }
 
     public function testOneShotListAndIteratorCarryTheFilters(): void

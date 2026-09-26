@@ -39,10 +39,13 @@ final class Coupons extends BaseResource
     /**
      * Patch mutable fields on a coupon.
      *
-     * ``['max_redemptions' => null]`` removes the redemption cap and
-     * ``['redeem_by' => null]`` removes the expiry: both are sent as an
+     * ``['max_redemptions' => null]`` removes the redemption cap,
+     * ``['redeem_by' => null]`` removes the expiry,
+     * ``['applies_to_price_ids' => null]`` lifts the price restriction and
+     * ``['min_amount_cents' => null]`` lifts the minimum: each is sent as an
      * explicit JSON null. Leave a key out to keep the stored value. Other
-     * ``null`` values are stripped.
+     * ``null`` values are stripped, because the API refuses a null on
+     * ``active`` with a 400.
      *
      * @param array<string, mixed> $params
      *
@@ -50,7 +53,11 @@ final class Coupons extends BaseResource
      */
     public function update(string $id, array $params): array
     {
-        return $this->postClearable('/v1/coupons/' . self::p($id), $params, ['max_redemptions', 'redeem_by']);
+        return $this->postClearable(
+            '/v1/coupons/' . self::p($id),
+            $params,
+            ['max_redemptions', 'redeem_by', 'applies_to_price_ids', 'min_amount_cents'],
+        );
     }
 
     /**

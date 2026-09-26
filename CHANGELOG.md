@@ -10,6 +10,14 @@ cadence.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-26
+
+### Changed
+- An explicit `null` now also clears `applies_to_price_ids` (lifts the price restriction) and `min_amount_cents` (lifts the minimum) on `coupons->update()`, `marketing_features` (empties the list) on `products->update()`, and `refund_window_initial_days` / `refund_window_renewal_days` (drops the price's override) on `prices->update()`. The refund windows were already clearable in the API, but the null was stripped, so the clear never reached it. Every other null is still stripped, because the API refuses a null there.
+  **Upgrade note:** as in 0.8.0, a null passed through from your own data clears the field: `['min_amount_cents' => $row->min]` with `$row->min` sometimes `null` now lifts the coupon's minimum, which widens who can redeem it. Omit the field when you mean "leave it".
+  **Requires the matching API release.** An older API accepts the null on `applies_to_price_ids`, `min_amount_cents` and `marketing_features` and leaves the value in place.
+- Every other update field refuses an explicit null with a `400` naming the field (the API used to ignore it). The SDK never sends one there; omit the field to leave it unchanged.
+
 ## [0.8.0] - 2026-09-26
 
 ### Added
@@ -275,7 +283,8 @@ First public release.
   is what lets Monolog, Laravel's `Log` channel and Symfony's logger all drop
   straight in.
 
-[Unreleased]: https://github.com/billkit-eu/billkit-php/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/billkit-eu/billkit-php/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/billkit-eu/billkit-php/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/billkit-eu/billkit-php/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/billkit-eu/billkit-php/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/billkit-eu/billkit-php/compare/v0.6.0...v0.7.0

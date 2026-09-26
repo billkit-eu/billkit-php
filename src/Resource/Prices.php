@@ -86,6 +86,12 @@ final class Prices extends BaseResource
      * - `refund_on_cancel` — `'none'` | `'full'` | `'prorated'`.
      * - `refund_window_initial_days` / `refund_window_renewal_days` — `0`
      *   disables refunds for that charge type, `N > 0` is an N-day window.
+     *   `null` is a value on these two, not an omission: it is sent as an
+     *   explicit JSON null and drops the price's override. Leave the key
+     *   out to keep the stored window.
+     *
+     * Every other ``null`` is stripped, because the API refuses a null on
+     * a field it cannot clear with a 400.
      *
      * The refund fields are the useful part: setting `refund_on_cancel`
      * here covers the customers already on the price, which is why it is
@@ -106,7 +112,11 @@ final class Prices extends BaseResource
      */
     public function update(string $id, array $params): array
     {
-        return $this->post('/v1/prices/' . self::p($id), $params);
+        return $this->postClearable(
+            '/v1/prices/' . self::p($id),
+            $params,
+            ['refund_window_initial_days', 'refund_window_renewal_days'],
+        );
     }
 
     /**

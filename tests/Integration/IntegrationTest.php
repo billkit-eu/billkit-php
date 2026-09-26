@@ -346,7 +346,7 @@ final class IntegrationTest extends TestCase
     }
 
     /**
-     * Six optional fields clear with a present-and-null key. Each goes
+     * Seven optional fields clear with a present-and-null key. Each goes
      * through the same array_key_exists path as `default_price_id`, so a
      * regression to plain null-stripping would send an empty body the API
      * reads as "change nothing".
@@ -394,9 +394,14 @@ final class IntegrationTest extends TestCase
         $kept = $c->coupons->update($couponId, ['min_amount_cents' => 100]);
         self::assertSame(5, $kept['max_redemptions']);
         self::assertNotNull($kept['redeem_by']);
-        $cleared = $c->coupons->update($couponId, ['max_redemptions' => null, 'redeem_by' => null]);
+        self::assertSame(100, $kept['min_amount_cents']);
+        $cleared = $c->coupons->update(
+            $couponId,
+            ['max_redemptions' => null, 'redeem_by' => null, 'min_amount_cents' => null],
+        );
         self::assertNull($cleared['max_redemptions']);
         self::assertNull($cleared['redeem_by']);
+        self::assertNull($cleared['min_amount_cents']);
 
         $rate = $c->taxRates->create([
             'country_code' => 'BE',

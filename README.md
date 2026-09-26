@@ -308,13 +308,19 @@ since been purged expands to `null` rather than failing the page.
 `null` values are stripped from a request body, with a few deliberate exceptions
 where the API reads an explicit null as an erasure: `vat_number` on
 `customers->setVatNumber()`, the address fields and `registration_number` on
-`tenant->setBillingProfile()`, `default_price_id` and `description` on `products->update()`,
-`name` on `customers->update()`, `description` on `webhookEndpoints->update()`,
-`max_redemptions` and `redeem_by` on `coupons->update()`, and `display_name` on
+`tenant->setBillingProfile()`, `default_price_id`, `description` and
+`marketing_features` on `products->update()`, `refund_window_initial_days` and
+`refund_window_renewal_days` on `prices->update()` (the price's override is
+dropped), `name` on `customers->update()`, `description` on
+`webhookEndpoints->update()`, `max_redemptions`, `redeem_by`,
+`applies_to_price_ids` (lifts the price restriction) and `min_amount_cents`
+(lifts the minimum) on `coupons->update()`, and `display_name` on
 `taxRates->update()`. Leave the key out to keep the stored value;
 pass it as `null` to empty it. Your own `vat_id` is the exception inside that
 call: it can be set once, and changing or clearing it afterwards is refused
-(`vat_id_locked`) because support changes it.
+(`vat_id_locked`) because support changes it. Any other null is stripped, which
+matters because the API refuses a null on a field it cannot clear with a 400
+naming the field.
 
 ```php
 $client->customers->setVatNumber($id, ['vat_number' => null]);   // deregistered

@@ -51,11 +51,14 @@ final class Products extends BaseResource
      * that price's interval. It must be an active price of this product;
      * anything else throws {@see \BillKit\Exception\InvalidRequestException}
      * on ``default_price_id``. Unlike the other keys here, a ``null``
-     * ``default_price_id`` or ``description`` is a value, not an omission:
-     * ``['default_price_id' => null]`` is sent as an explicit JSON null and
-     * **clears** the default, and ``['description' => null]`` removes the
-     * description. Leave the key out to keep the stored value. Other
-     * ``null`` values are still stripped.
+     * ``default_price_id``, ``description`` or ``marketing_features`` is a
+     * value, not an omission: ``['default_price_id' => null]`` is sent as an
+     * explicit JSON null and **clears** the default,
+     * ``['description' => null]`` removes the description and
+     * ``['marketing_features' => null]`` empties the list. Leave the key out
+     * to keep the stored value. Other ``null`` values are still stripped,
+     * because the API refuses a null on a field it cannot clear with a 400.
+     * ``metadata`` replaces the stored object whole; send ``[]`` to empty it.
      *
      * @param array<string, mixed> $params
      *
@@ -66,7 +69,7 @@ final class Products extends BaseResource
         return $this->postClearable(
             '/v1/products/' . self::p($id),
             $params,
-            ['default_price_id', 'description'],
+            ['default_price_id', 'description', 'marketing_features'],
         );
     }
 
