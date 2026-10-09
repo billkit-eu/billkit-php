@@ -11,16 +11,27 @@ use BillKit\Collection;
  *
  * A one-shot payment charges a customer a single time without creating a
  * reusable mandate: there is no subscription, no renewal, and nothing is
- * stored for future off-session use. Use it for one-time purchases where a
- * hosted redirect flow is acceptable.
+ * stored for future off-session use. Use it for one-time purchases, either
+ * through Mollie's hosted page or embedded in your own page.
  */
 final class OneShotPayments extends BaseResource
 {
     /**
-     * Create a one-shot (mandate-less) payment and get a redirect URL.
+     * Create a one-shot (mandate-less) payment.
      *
-     * The created object has ``"object": "one_shot_payment"`` and a
+     * Hosted (``ui_mode`` omitted or ``"hosted"``, the default) needs a
+     * ``method``: the created object has ``"object": "one_shot_payment"`` and a
      * ``redirect_url``. Send the shopper there to complete the payment.
+     *
+     * Embedded (``'ui_mode' => 'embedded'``) must be sent WITHOUT ``method``.
+     * No provider payment is created yet; the response carries a short-lived
+     * ``client_secret`` (and a null ``redirect_url``) for the browser payment
+     * element (``mountOneShotPaymentElement`` in ``@billkit-eu/js``), where the
+     * shopper picks the method. ``method`` stays null until they confirm,
+     * ``expires_at`` is when the secret and the unconfirmed charge lapse, and
+     * the secret is on the create response only: a retrieve reads it as null.
+     * The server refuses a wrong ``method``/``ui_mode`` combination with a 422.
+     *
      * Because no mandate is created, the charge cannot be replayed later.
      *
      * ``refund_window_days`` controls how long the payment stays refundable:

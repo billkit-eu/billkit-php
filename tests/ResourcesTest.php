@@ -148,6 +148,30 @@ final class ResourcesTest extends BillKitTestCase
         self::assertArrayNotHasKey('cancel_url', $body);
     }
 
+    public function testEmbeddedOneShotSendsUiModeWithoutMethodAndReturnsClientSecret(): void
+    {
+        $http = (new MockHttpClient())->stage(200, [
+            'object' => 'one_shot_payment',
+            'id' => 'osp_1',
+            'ui_mode' => 'embedded',
+            'method' => null,
+            'redirect_url' => null,
+            'client_secret' => 'osp_1_secret_abc',
+        ]);
+        $created = $this->makeClient($http)->oneShotPayments->create([
+            'customer_id' => 'cus_1',
+            'amount_cents' => 1999,
+            'currency' => 'EUR',
+            'ui_mode' => 'embedded',
+            'success_url' => 'https://app.example.com/done',
+        ]);
+
+        self::assertSame('osp_1_secret_abc', $created['client_secret']);
+        $body = $this->bodyArray($http->lastRequest());
+        self::assertSame('embedded', $body['ui_mode']);
+        self::assertArrayNotHasKey('method', $body);
+    }
+
     public function testOneShotPaymentRetrieveIsGet(): void
     {
         $http = (new MockHttpClient())->stage(200, ['object' => 'one_shot_payment', 'id' => 'osp_1']);

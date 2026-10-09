@@ -10,6 +10,11 @@ cadence.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-09
+
+### Added
+- Embedded one-off payments: `oneShotPayments->create(['ui_mode' => 'embedded', ...])`, sent without `method`, creates no provider payment yet and returns a short-lived `client_secret` (with a null `redirect_url`) for the browser payment element in `@billkit-eu/js` / `@billkit-eu/react`, where the shopper picks the method. The body was already passed through as-is, so this release documents the mode and pins it with a test. Events, refunds and the payment id work as for a hosted one-shot. **Requires the matching API release.**
+
 ## [0.8.1] - 2026-09-26
 
 ### Changed

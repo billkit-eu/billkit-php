@@ -74,6 +74,21 @@ $client->refunds->create(['one_shot_payment_id' => $payment['id']]);
 $client->refunds->create(['one_shot_payment_id' => $payment['id'], 'amount_cents' => 500]);
 ```
 
+To take the payment inside your own page instead of redirecting to Mollie, create it with `'ui_mode' => 'embedded'` and no `method`, and hand only the `client_secret` to the browser, where `mountOneShotPaymentElement` from `@billkit-eu/js` lets the shopper pick a method and pay:
+
+```php
+$embedded = $client->oneShotPayments->create([
+    'customer_id' => $customer['id'],
+    'amount_cents' => 2500,
+    'currency' => 'EUR',
+    'ui_mode' => 'embedded',
+    'success_url' => 'https://shop.example.com/thanks',
+]);
+$clientSecret = $embedded['client_secret']; // short-lived, on the create response only
+```
+
+`redirect_url` is `null` and `method` stays `null` until the shopper confirms. Fulfil from the same `one_shot_payment.succeeded` webhook as a hosted one-shot.
+
 ## Configuration
 
 ```php
@@ -266,7 +281,7 @@ page) and `autoPagingIterator()` (walk all pages).
 | `products` | create, retrieve, update (archive with `['active' => false]`), all, autoPagingIterator |
 | `prices` | create, retrieve, update (archive with `['active' => false]`), all, autoPagingIterator (filter by `product_id`) |
 | `checkoutSessions` | create, retrieve |
-| `oneShotPayments` | create, retrieve, all, autoPagingIterator (filter by `customer_id` / `status`) |
+| `oneShotPayments` | create (`'ui_mode' => 'embedded'` omits `method` and returns a `client_secret`), retrieve, all, autoPagingIterator (filter by `customer_id` / `status`) |
 | `subscriptions` | retrieve, all, autoPagingIterator (filter by `customer_id`, `status`, `renewal_state`), cancel, pause, resume, reactivate, previewUpdate, update, reauthorizePaymentMethod, createUsageRecord, listUsageRecords, autoPagingIteratorUsageRecords, retrieveUsageSummary |
 | `refunds` | create, retrieve, all, autoPagingIterator |
 | `disputes` | retrieve, all, autoPagingIterator (filter by `status`, `payment_id`) |

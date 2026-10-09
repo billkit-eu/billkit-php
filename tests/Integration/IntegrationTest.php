@@ -56,6 +56,7 @@ final class IntegrationTest extends TestCase
         'crud.credit_note_absent_until_refunded',
         'crud.nullable_fields_clear',
         'routes.one_shot_list',
+        'routes.one_shot_embedded',
         'money.payment_refund_eligibility',
         'filters.subscription_renewal_state',
         'filters.customer_provisional',
@@ -1578,6 +1579,29 @@ final class IntegrationTest extends TestCase
         self::assertGreaterThan($card['expires_at'], $transfer['expires_at']);
         $days = ($transfer['expires_at'] - time()) / 86400;
         self::assertGreaterThan(5, $days, 'a bank transfer stays open for days, not minutes');
+    }
+
+    public function testRoutesOneShotEmbedded(): void
+    {
+        $t = IntegrationHarness::provisionTenant('one-shot-embedded');
+        $c = $this->client($t['api_key']);
+        $buyer = $this->methodBuyer($c);
+        $created = $c->oneShotPayments->create([
+            'customer_id' => $buyer['id'],
+            'amount_cents' => 2500,
+            'currency' => 'EUR',
+            'ui_mode' => 'embedded',
+            'success_url' => 'https://merchant.example.com/ok',
+        ]);
+        self::assertSame('embedded', $created['ui_mode']);
+        self::assertNull($created['redirect_url']);
+        self::assertNull($created['method']);
+        self::assertIsString($created['client_secret']);
+        self::assertStringStartsWith($created['id'] . '_secret_', $created['client_secret']);
+
+        $read = $c->oneShotPayments->retrieve($created['id']);
+        self::assertNull($read['client_secret']);
+        self::assertSame('embedded', $read['ui_mode']);
     }
 
     public function testRoutesOneShotList(): void
