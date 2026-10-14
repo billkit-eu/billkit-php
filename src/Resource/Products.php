@@ -5,101 +5,102 @@ declare(strict_types=1);
 namespace BillKit\Resource;
 
 use BillKit\Collection;
+use BillKit\Model\Product;
 
-/** Catalog products; attach one or more Prices to each. */
+/**
+ * Products: what you sell. Prices hang off them.
+ *
+ * @internal constructed by {@see \BillKit\BillKitClient}; use `$client->products`.
+ */
 final class Products extends BaseResource
 {
     /**
-     * Create a catalog product.
+     * Create a catalogue product.
      *
      * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @return array<string, mixed>
+     * @return Product
      */
-    public function create(array $params): array
+    public function create(array $params = [], array $opts = []): Product
     {
-        return $this->post('/v1/products', $params);
+        return $this->postObject('/v1/products', $params, $opts, Product::class);
     }
 
     /**
-     * Fetch a single product by id.
+     * One product.
      *
-     * ``['expand' => ['prices']]`` attaches every price on the product
-     * (archived ones too, active first); ``'stats'`` attaches the live
-     * subscriber and revenue counts; ``'default_price'`` attaches the price
-     * ``default_price_id`` names. Those three are the only relations this
-     * route expands.
+     * `['expand' => ['prices']]` attaches every price on the product (archived
+     * ones too, active first); `'stats'` attaches live subscriber and revenue
+     * counts; `'default_price'` attaches the price `default_price_id` names.
      *
-     * @param array<string, scalar|list<string>|null> $params ``expand`` only
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @return array<string, mixed>
+     * @return Product
      */
-    public function retrieve(string $id, array $params = []): array
+    public function retrieve(string $id, array $params = [], array $opts = []): Product
     {
-        return $this->get('/v1/products/' . self::p($id), $params);
+        return $this->getObject('/v1/products/' . self::p($id), $params, $opts, Product::class);
     }
 
     /**
-     * Patch mutable fields on a product, or archive it.
+     * Change a product, or archive it.
      *
-     * `['active' => false]` archives: the product stops being offered and
-     * a checkout against any of its prices is refused. It keeps its id
-     * and stays readable, because what was sold under it has to be, which
-     * is why there is no delete. `['active' => true]` un-archives.
+     * `['active' => false]` archives: the product stops being offered and a
+     * checkout against any of its prices is refused, but it keeps its id and
+     * stays readable, which is why there is no delete. `['active' => true]` puts
+     * it back.
      *
-     * ``default_price_id`` names the price the billing portal offers on
-     * that price's interval. It must be an active price of this product;
-     * anything else throws {@see \BillKit\Exception\InvalidRequestException}
-     * on ``default_price_id``. Unlike the other keys here, a ``null``
-     * ``default_price_id``, ``description`` or ``marketing_features`` is a
-     * value, not an omission: ``['default_price_id' => null]`` is sent as an
-     * explicit JSON null and **clears** the default,
-     * ``['description' => null]`` removes the description and
-     * ``['marketing_features' => null]`` empties the list. Leave the key out
-     * to keep the stored value. Other ``null`` values are still stripped,
-     * because the API refuses a null on a field it cannot clear with a 400.
-     * ``metadata`` replaces the stored object whole; send ``[]`` to empty it.
+     * `default_price_id`, `description` and `marketing_features` take `null` as
+     * a value: it is sent as an explicit JSON null and clears the field. Leave a
+     * key out to keep the stored value; every other `null` is dropped.
+     * `metadata` replaces the stored object whole.
      *
      * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @return array<string, mixed>
+     * @return Product
      */
-    public function update(string $id, array $params): array
+    public function update(string $id, array $params = [], array $opts = []): Product
     {
-        return $this->postClearable(
+        return $this->postObject(
             '/v1/products/' . self::p($id),
             $params,
+            $opts,
+            Product::class,
             ['default_price_id', 'description', 'marketing_features'],
         );
     }
 
     /**
-     * List one page of products. Use {@see self::autoPagingIterator()} to
-     * walk every page.
+     * One page of products. `['expand' => ['prices', 'stats', 'default_price']]`
+     * is accepted, resolved for the whole page in one query.
      *
-     * ``['expand' => ['prices', 'stats', 'default_price']]`` is accepted
-     * here too, and is resolved for the whole page in one query rather
-     * than per row.
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @param array<string, scalar|list<string>|null> $params
-     *
-     * @return array<string, mixed>
+     * @return Collection<Product>
      */
-    public function all(array $params = []): array
+    public function all(array $params = [], array $opts = []): Collection
     {
-        return $this->get('/v1/products', $params);
+        return $this->getList('/v1/products', $params, $opts, Product::class);
     }
 
     /**
-     * Yield every product across all pages.
+     * Every item across all pages.
      *
-     * @return \Generator<int, mixed>
+     * Takes the same `$params` as {@see self::all()}; the filters are carried
+     * onto every page request, so a filtered walk narrows server-side. `limit`
+     * sets the page size.
+     *
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return \Generator<int, Product>
      */
-    public function autoPagingIterator(?int $pageSize = null): \Generator
+    public function autoPagingIterator(array $params = [], array $opts = []): \Generator
     {
-        yield from Collection::autoPagingIterator(
-            fn (array $p): array => $this->get('/v1/products', $p),
-            $pageSize,
-        );
+        yield from $this->all($params, $opts)->autoPagingIterator();
     }
 }

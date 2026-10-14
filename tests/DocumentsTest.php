@@ -13,7 +13,7 @@ use BillKit\Tests\Support\MockHttpClient;
  * These are the only calls that return bytes rather than JSON, and the only
  * ones that follow a redirect. Both differences are where the mistakes live:
  * handing back a JSON-decoded husk instead of a PDF, losing the typed
- * exception when a deployment has no renderer, and — the one that matters —
+ * exception when a deployment has no renderer, and, the one that matters.
  * carrying the API key across to the storage host the redirect points at.
  *
  * These run through the PSR-18 seam, which is also the transport that has to

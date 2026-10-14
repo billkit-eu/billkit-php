@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace BillKit\Tests;
 
+use BillKit\Model\PurgedResource;
 use BillKit\Tests\Support\MockHttpClient;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * Path/method/body assertions across the less-obvious resource verbs, so
@@ -16,7 +18,7 @@ final class ResourcesTest extends BillKitTestCase
     public function testTenantCapabilitiesIsGet(): void
     {
         $http = (new MockHttpClient())->stage(200, ['methods' => []]);
-        $this->makeClient($http)->tenant->capabilities();
+        $this->makeClient($http)->tenant->retrieveCapabilities();
 
         self::assertSame('GET', $http->lastRequest()->getMethod());
         self::assertSame(self::BASE_URL . '/v1/tenant/capabilities', $this->url($http->lastRequest()));
@@ -40,14 +42,124 @@ final class ResourcesTest extends BillKitTestCase
         self::assertSame(999, $body['amount_cents']);
     }
 
-    public function testPurgeDefaultsConfirmedTrue(): void
+    public function testCouponValidateSendsCurrency(): void
     {
-        $http = (new MockHttpClient())->stage(200, ['purged' => true]);
-        $this->makeClient($http)->customers->purge('cus_1');
+        // validate builds its body from a fixed key list, so a key missing
+        // from that list never reaches the API at all.
+        $http = (new MockHttpClient())->stage(200, ['valid' => false, 'reason' => 'coupon_currency_mismatch']);
+        $result = $this->makeClient($http)->coupons->validate([
+            'code' => 'TENOFF',
+            'amount_cents' => 6000,
+            'currency' => 'EUR',
+        ]);
+
+        self::assertSame('EUR', $this->bodyArray($http->lastRequest())['currency']);
+        self::assertSame('coupon_currency_mismatch', $result['reason']);
+    }
+
+    public function testCouponCreatePassesCurrencyThrough(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['id' => 'co_1', 'currency' => 'SEK']);
+        $this->makeClient($http)->coupons->create([
+            'code' => 'TENOFF',
+            'discount_type' => 'fixed_cents',
+            'discount_value' => 1000,
+            'duration' => 'once',
+            'currency' => 'SEK',
+        ]);
+
+        self::assertSame('SEK', $this->bodyArray($http->lastRequest())['currency']);
+    }
+
+    public function testPurgeSendsTheConfirmation(): void
+    {
+        $http = (new MockHttpClient())->stage(200, [
+            'id' => 'cus_1',
+            'object' => 'customer',
+            'deleted' => true,
+            'purged' => true,
+        ]);
+        $purged = $this->makeClient($http)->customers->purge('cus_1', ['confirmed' => true]);
 
         $req = $http->lastRequest();
         self::assertSame(self::BASE_URL . '/v1/customers/cus_1/purge', $this->url($req));
-        self::assertTrue($this->bodyArray($req)['confirmed']);
+        self::assertSame(['confirmed' => true], $this->bodyArray($req));
+        // The deletion marker plus `purged`, never the erased customer.
+        self::assertInstanceOf(PurgedResource::class, $purged);
+        self::assertSame(['cus_1', 'customer', true, true], [$purged->id, $purged->object, $purged->deleted, $purged->purged]);
+    }
+
+    public function testCouponPercentOffTakesAFraction(): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['id' => 'co_1', 'percent_off' => 12.5]);
+        $coupon = $this->makeClient($http)->coupons->create(['code' => 'HALF', 'percent_off' => 12.5]);
+
+        self::assertStringContainsString('"percent_off":12.5', (string) $http->lastRequest()->getBody());
+        self::assertSame(12.5, $coupon->percent_off);
+    }
+
+    /**
+     * The four list filters the API types as arrays (`style=form`,
+     * `explode=false`) take a PHP list and go out comma-joined, once.
+     *
+     * @return iterable<string, array{0: string, 1: string, 2: array<string, mixed>, 3: string}>
+     */
+    public static function listFilters(): iterable
+    {
+        yield 'subscription status' => ['subscriptions', '/v1/subscriptions', ['status' => ['active', 'past_due']], 'status=active%2Cpast_due'];
+        yield 'subscription renewal_state' => ['subscriptions', '/v1/subscriptions', ['renewal_state' => ['paused', 'canceling']], 'renewal_state=paused%2Ccanceling'];
+        yield 'dispute status' => ['disputes', '/v1/disputes', ['status' => ['open', 'won']], 'status=open%2Cwon'];
+        yield 'event type' => ['events', '/v1/events', ['type' => ['invoice.paid', 'invoice.payment_failed']], 'type=invoice.paid%2Cinvoice.payment_failed'];
+        yield 'one string as given' => ['events', '/v1/events', ['type' => 'customer.created'], 'type=customer.created'];
+    }
+
+    /**
+     * @param array<string, mixed> $params
+     */
+    #[DataProvider('listFilters')]
+    public function testListFiltersJoinAListWithCommas(string $resource, string $path, array $params, string $query): void
+    {
+        $http = (new MockHttpClient())->stage(200, ['object' => 'list', 'data' => [], 'has_more' => false]);
+        $client = $this->makeClient($http);
+        match ($resource) {
+            'subscriptions' => $client->subscriptions->all($params),
+            'disputes' => $client->disputes->all($params),
+            'events' => $client->events->all($params),
+        };
+
+        self::assertSame(self::BASE_URL . $path . '?' . $query, (string) $http->lastRequest()->getUri());
+    }
+
+    /**
+     * Erasure cannot be undone, so the confirmation is the caller's to give.
+     * 0.x sent `confirmed: true` on the caller's behalf, which made the
+     * server's fat-finger guard guard nothing.
+     *
+     * @return iterable<string, array{0: array<string, mixed>}>
+     */
+    public static function unconfirmedPurges(): iterable
+    {
+        yield 'no params' => [[]];
+        yield 'confirmed false' => [['confirmed' => false]];
+        yield 'truthy string' => [['confirmed' => 'yes']];
+        yield 'truthy int' => [['confirmed' => 1]];
+    }
+
+    /**
+     * @param array<string, mixed> $params
+     */
+    #[DataProvider('unconfirmedPurges')]
+    public function testPurgeWithoutConfirmationThrowsBeforeAnyRequest(array $params): void
+    {
+        $http = new MockHttpClient();
+
+        try {
+            $this->makeClient($http)->customers->purge('cus_1', $params);
+            self::fail('an unconfirmed purge must not be sent');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString("'confirmed' => true", $e->getMessage());
+        }
+        self::assertSame([], $http->requests);
     }
 
     public function testSubscriptionReactivatePath(): void
@@ -61,7 +173,7 @@ final class ResourcesTest extends BillKitTestCase
     public function testSubscriptionUpdateSendsTargetPriceId(): void
     {
         $http = (new MockHttpClient())->stage(200, ['id' => 'sub_1']);
-        $this->makeClient($http)->subscriptions->update('sub_1', 'price_new');
+        $this->makeClient($http)->subscriptions->update('sub_1', ['target_price_id' => 'price_new']);
 
         $req = $http->lastRequest();
         self::assertSame(self::BASE_URL . '/v1/subscriptions/sub_1/update', $this->url($req));
@@ -86,22 +198,22 @@ final class ResourcesTest extends BillKitTestCase
     public function testWebhookDeliveryRedeliverPath(): void
     {
         $http = (new MockHttpClient())->stage(200, ['status' => 'pending']);
-        $this->makeClient($http)->webhookEndpoints->redeliver('we_1', 'wde_1');
+        $this->makeClient($http)->webhookEndpoints->redeliver('we_1', 'whd_1');
 
         self::assertSame(
-            self::BASE_URL . '/v1/webhook_endpoints/we_1/deliveries/wde_1/redeliver',
+            self::BASE_URL . '/v1/webhook_endpoints/we_1/deliveries/whd_1/redeliver',
             $this->url($http->lastRequest()),
         );
     }
 
     public function testWebhookRetrieveDeliveryPath(): void
     {
-        $http = (new MockHttpClient())->stage(200, ['id' => 'wde_1']);
-        $this->makeClient($http)->webhookEndpoints->retrieveDelivery('we_1', 'wde_1');
+        $http = (new MockHttpClient())->stage(200, ['id' => 'whd_1']);
+        $this->makeClient($http)->webhookEndpoints->retrieveDelivery('we_1', 'whd_1');
 
         $req = $http->lastRequest();
         self::assertSame('GET', $req->getMethod());
-        self::assertSame(self::BASE_URL . '/v1/webhook_endpoints/we_1/deliveries/wde_1', $this->url($req));
+        self::assertSame(self::BASE_URL . '/v1/webhook_endpoints/we_1/deliveries/whd_1', $this->url($req));
     }
 
     public function testTaxRateCreateAndRetrieve(): void
@@ -129,7 +241,7 @@ final class ResourcesTest extends BillKitTestCase
             'customer_id' => 'cus_1',
             'amount_cents' => 1999,
             'currency' => 'EUR',
-            'method' => 'ideal',
+            'payment_method' => 'ideal',
             'success_url' => 'https://app.example.com/done',
             'cancel_url' => null,
             'refund_window_days' => 0,
@@ -142,19 +254,19 @@ final class ResourcesTest extends BillKitTestCase
         self::assertSame('cus_1', $body['customer_id']);
         self::assertSame(1999, $body['amount_cents']);
         self::assertSame('EUR', $body['currency']);
-        self::assertSame('ideal', $body['method']);
+        self::assertSame('ideal', $body['payment_method']);
         self::assertSame('https://app.example.com/done', $body['success_url']);
         self::assertSame(0, $body['refund_window_days']);
         self::assertArrayNotHasKey('cancel_url', $body);
     }
 
-    public function testEmbeddedOneShotSendsUiModeWithoutMethodAndReturnsClientSecret(): void
+    public function testEmbeddedOneShotSendsUiModeWithoutPaymentMethodAndReturnsClientSecret(): void
     {
         $http = (new MockHttpClient())->stage(200, [
             'object' => 'one_shot_payment',
             'id' => 'osp_1',
             'ui_mode' => 'embedded',
-            'method' => null,
+            'payment_method' => null,
             'redirect_url' => null,
             'client_secret' => 'osp_1_secret_abc',
         ]);
@@ -169,7 +281,8 @@ final class ResourcesTest extends BillKitTestCase
         self::assertSame('osp_1_secret_abc', $created['client_secret']);
         $body = $this->bodyArray($http->lastRequest());
         self::assertSame('embedded', $body['ui_mode']);
-        self::assertArrayNotHasKey('method', $body);
+        self::assertArrayNotHasKey('payment_method', $body);
+        self::assertNull($created->payment_method);
     }
 
     public function testOneShotPaymentRetrieveIsGet(): void
@@ -260,7 +373,7 @@ final class ResourcesTest extends BillKitTestCase
             'object' => 'webhook_endpoint',
             'deleted' => true,
         ]);
-        $gone = $this->makeClient($http)->webhookEndpoints->delete('we_1', 'drop-1');
+        $gone = $this->makeClient($http)->webhookEndpoints->delete('we_1', [], ['idempotency_key' => 'drop-1']);
 
         $req = $http->lastRequest();
         self::assertSame('DELETE', $req->getMethod());
@@ -271,7 +384,7 @@ final class ResourcesTest extends BillKitTestCase
 
     public function testCreateUsageRecordPostsBodyAndLiftsIdempotencyKey(): void
     {
-        $http = (new MockHttpClient())->stage(201, [
+        $http = (new MockHttpClient())->stage(200, [
             'id' => 'ur_1',
             'object' => 'usage_record',
             'subscription_id' => 'sub_1',
@@ -282,8 +395,7 @@ final class ResourcesTest extends BillKitTestCase
             'quantity' => 42,
             'occurred_at' => 1700000000,
             'metadata' => ['source' => 'unit'],
-            'idempotency_key' => 'usage-1',
-        ]);
+        ], ['idempotency_key' => 'usage-1']);
 
         $req = $http->lastRequest();
         self::assertSame('POST', $req->getMethod());
@@ -299,7 +411,7 @@ final class ResourcesTest extends BillKitTestCase
 
     public function testCreateUsageRecordMinimalBodyOmitsOptionals(): void
     {
-        $http = (new MockHttpClient())->stage(201, ['id' => 'ur_1', 'object' => 'usage_record']);
+        $http = (new MockHttpClient())->stage(200, ['id' => 'ur_1', 'object' => 'usage_record']);
         $this->makeClient($http)->subscriptions->createUsageRecord('sub_1', ['quantity' => 1]);
 
         $body = $this->bodyArray($http->lastRequest());
@@ -328,7 +440,7 @@ final class ResourcesTest extends BillKitTestCase
     public function testAutoPagingUsageRecordsCarriesInvoiceIdOnEveryPage(): void
     {
         // The filter used to be dropped, so `'pending'` silently walked
-        // every usage record ever reported — the opposite of the question
+        // every usage record ever reported, the opposite of the question
         // the caller asked, and with no error to notice.
         $http = (new MockHttpClient())
             ->stage(200, [
@@ -346,8 +458,7 @@ final class ResourcesTest extends BillKitTestCase
         foreach (
             $this->makeClient($http)->subscriptions->autoPagingIteratorUsageRecords(
                 'sub_1',
-                pageSize: 2,
-                invoiceId: 'pending',
+                ['limit' => 2, 'invoice_id' => 'pending'],
             ) as $record
         ) {
             $ids[] = $record['id'];
@@ -430,8 +541,7 @@ final class ResourcesTest extends BillKitTestCase
         $http = (new MockHttpClient())->stage(200, ['id' => 'price_1', 'active' => false]);
         $this->makeClient($http)->prices->update('price_1', [
             'active' => false,
-            'idempotency_key' => 'archive-1',
-        ]);
+        ], ['idempotency_key' => 'archive-1']);
 
         self::assertSame('archive-1', $http->lastRequest()->getHeaderLine('Idempotency-Key'));
     }
@@ -483,8 +593,7 @@ final class ResourcesTest extends BillKitTestCase
         $ids = [];
         foreach (
             $this->makeClient($http)->subscriptions->autoPagingIterator(
-                pageSize: 1,
-                filters: ['renewal_state' => 'paused'],
+                ['limit' => 1, 'renewal_state' => 'paused'],
             ) as $sub
         ) {
             $ids[] = $sub['id'];
@@ -581,8 +690,8 @@ final class ResourcesTest extends BillKitTestCase
             'billing_scheme' => 'tiered',
             'tiers_mode' => 'graduated',
             'tiers' => [
-                ['up_to' => 1000, 'unit_amount' => 1],
-                ['up_to' => 'inf', 'unit_amount_decimal' => '0.5', 'flat_amount' => 500],
+                ['up_to' => 1000, 'unit_amount_cents' => 1],
+                ['up_to' => 'inf', 'unit_amount_decimal' => '0.5', 'flat_amount_cents' => 500],
             ],
         ]);
 
@@ -590,8 +699,8 @@ final class ResourcesTest extends BillKitTestCase
         self::assertSame('tiered', $body['billing_scheme']);
         self::assertSame('graduated', $body['tiers_mode']);
         self::assertSame([
-            ['up_to' => 1000, 'unit_amount' => 1],
-            ['up_to' => 'inf', 'unit_amount_decimal' => '0.5', 'flat_amount' => 500],
+            ['up_to' => 1000, 'unit_amount_cents' => 1],
+            ['up_to' => 'inf', 'unit_amount_decimal' => '0.5', 'flat_amount_cents' => 500],
         ], $body['tiers']);
     }
 
@@ -656,7 +765,7 @@ final class ResourcesTest extends BillKitTestCase
     {
         // The dedupe an Idempotency-Key cannot do: a job runner replaying
         // its own task sends a NEW request with a NEW key.
-        $http = (new MockHttpClient())->stage(201, ['id' => 'ur_1', 'identifier' => 'job-42']);
+        $http = (new MockHttpClient())->stage(200, ['id' => 'ur_1', 'identifier' => 'job-42']);
         $this->makeClient($http)->subscriptions->createUsageRecord('sub_1', [
             'quantity' => 10,
             'identifier' => 'job-42',
@@ -869,7 +978,7 @@ final class ResourcesTest extends BillKitTestCase
             ->stage(200, ['object' => 'tenant_billing_profile', 'country_code' => 'NL', 'vat_id' => null]);
         $client = $this->makeClient($http);
 
-        $client->tenant->billingProfile();
+        $client->tenant->retrieveBillingProfile();
         self::assertSame('GET', $http->lastRequest()->getMethod());
         self::assertSame(self::BASE_URL . '/v1/tenant/billing_profile', $this->url($http->lastRequest()));
 
@@ -882,7 +991,50 @@ final class ResourcesTest extends BillKitTestCase
         ]);
         $req = $http->lastRequest();
         self::assertSame('POST', $req->getMethod());
-        self::assertSame('{"country_code":"NL","vat_id":null,"city":"Amsterdam"}', (string) $req->getBody());
+        self::assertSame('{"country_code":"NL","city":"Amsterdam","vat_id":null}', (string) $req->getBody());
+    }
+
+    public function testSetPortalBrandingSendsAnExplicitNullToClearEachField(): void
+    {
+        $fields = ['business_name', 'support_email', 'logo_url', 'theme', 'capabilities'];
+        $http = new MockHttpClient();
+        foreach ($fields as $_) {
+            $http->stage(200, ['object' => 'tenant_portal_branding']);
+        }
+        $http->stage(200, ['object' => 'tenant_portal_branding']);
+        $client = $this->makeClient($http);
+
+        // Each field alone, so one clearable key cannot hide another.
+        foreach ($fields as $field) {
+            $client->tenant->setPortalBranding([$field => null, 'business_name_typo' => null]);
+            $req = $http->lastRequest();
+            self::assertSame(self::BASE_URL . '/v1/tenant/portal_branding', $this->url($req));
+            self::assertSame(json_encode([$field => null]), (string) $req->getBody(), $field);
+        }
+
+        // Absent leaves the stored value alone: only what was passed is sent.
+        $client->tenant->setPortalBranding(['business_name' => 'Acme']);
+        self::assertSame('{"business_name":"Acme"}', (string) $http->lastRequest()->getBody());
+    }
+
+    public function testSetBillingProfileForwardsAnUnknownKeyInsteadOfDroppingIt(): void
+    {
+        // The API's update model forbids extra fields, so a misspelt key is
+        // a 400 naming it. Dropping it here turned that into a silent
+        // success that changed nothing.
+        $http = (new MockHttpClient())->stage(200, ['object' => 'tenant_billing_profile']);
+        $client = $this->makeClient($http);
+
+        $client->tenant->setBillingProfile([
+            'country_code' => 'NL',
+            'adress_line1' => 'Damrak 1',
+            'postal_code' => null,
+            'some_other_null' => null,
+        ]);
+        self::assertSame(
+            '{"country_code":"NL","adress_line1":"Damrak 1","postal_code":null}',
+            (string) $http->lastRequest()->getBody(),
+        );
     }
 
     public function testProductUpdateDefaultPriceIdSetClearAndOmit(): void
@@ -893,7 +1045,7 @@ final class ResourcesTest extends BillKitTestCase
             ->stage(200, ['id' => 'prod_1']);
         $client = $this->makeClient($http);
 
-        $client->products->update('prod_1', ['default_price_id' => 'price_2', 'idempotency_key' => 'dp-1']);
+        $client->products->update('prod_1', ['default_price_id' => 'price_2'], ['idempotency_key' => 'dp-1']);
         $req = $http->lastRequest();
         self::assertSame(self::BASE_URL . '/v1/products/prod_1', $this->url($req));
         self::assertSame('{"default_price_id":"price_2"}', (string) $req->getBody());
@@ -1047,7 +1199,7 @@ final class ResourcesTest extends BillKitTestCase
         self::assertSame('customer_id=cus_1&status=paid&limit=5', $req->getUri()->getQuery());
 
         $ids = [];
-        foreach ($client->oneShotPayments->autoPagingIterator(1, 'cus_1', 'paid') as $row) {
+        foreach ($client->oneShotPayments->autoPagingIterator(['customer_id' => 'cus_1', 'status' => 'paid', 'limit' => 1]) as $row) {
             $ids[] = $row['id'];
         }
         self::assertSame(['osp_1', 'osp_2'], $ids);
@@ -1123,7 +1275,7 @@ final class ResourcesTest extends BillKitTestCase
             ->stage(200, ['object' => 'list', 'data' => [['id' => 'dp_2']], 'has_more' => false]);
 
         $rows = iterator_to_array(
-            $this->makeClient($http)->disputes->autoPagingIterator(pageSize: 1, status: 'open'),
+            $this->makeClient($http)->disputes->autoPagingIterator(['status' => 'open', 'limit' => 1]),
         );
 
         self::assertCount(2, $rows);

@@ -5,84 +5,82 @@ declare(strict_types=1);
 namespace BillKit\Resource;
 
 use BillKit\Collection;
+use BillKit\Model\CreditNote;
 
 /**
- * Read-only access to credit notes — the documents that reverse an
- * issued invoice.
+ * Credit notes: the documents that reverse part or all of an invoice.
  *
- * There is no create. A credit note is issued for you when a refund
- * settles, never on request, so a numbered legal record is only minted
- * once the money has actually moved. A refund that is still pending, a
- * refund that fails, and a refund of a one-off charge that was never
- * invoiced all produce none.
+ * @internal constructed by {@see \BillKit\BillKitClient}; use `$client->creditNotes`.
  */
 final class CreditNotes extends BaseResource
 {
     /**
-     * Fetch a single credit note by id.
+     * One credit note.
      *
-     * @return array<string, mixed>
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return CreditNote
      */
-    public function retrieve(string $id): array
+    public function retrieve(string $id, array $params = [], array $opts = []): CreditNote
     {
-        return $this->get('/v1/credit_notes/' . self::p($id));
+        return $this->getObject('/v1/credit_notes/' . self::p($id), $params, $opts, CreditNote::class);
     }
 
     /**
-     * Download the rendered credit note PDF as raw bytes.
+     * The rendered credit note PDF, as raw bytes.
      *
      *     file_put_contents('credit-note.pdf', $client->creditNotes->retrievePdf('cn_123'));
      *
      * Blob-backed deployments stream the bytes inline; S3-backed ones answer
-     * ``302`` to a presigned URL, which the transport follows under the SDK's
-     * own timeout and retry policy — so both storage adapters look identical
-     * from here, and the API key never travels to the storage host.
+     * `302` to a presigned URL, which the transport follows under the SDK's own
+     * timeout and retry policy, so both storage adapters look identical from
+     * here and the API key never travels to the storage host.
      *
-     * Deployments with ``INVOICE_PDF_ENABLED=false`` never render one and
-     * answer ``501 rendering_pending``, which surfaces as a
-     * {@see \BillKit\Exception\ServerException} whose ``errorCode`` is
-     * ``rendering_pending``; {@see self::retrieve()} still returns the
-     * structured credit note for tenants who render their own.
+     * A deployment that does not render PDFs answers `501 rendering_pending`, a
+     * {@see \BillKit\Exception\ServerException} whose `errorCode` is
+     * `rendering_pending`.
+     *
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return string
      */
-    public function retrievePdf(string $id): string
+    public function retrievePdf(string $id, array $params = [], array $opts = []): string
     {
-        return $this->transport->requestBytes('GET', '/v1/credit_notes/' . self::p($id) . '/pdf');
+        return $this->getBytes('/v1/credit_notes/' . self::p($id) . '/pdf', $opts);
     }
 
     /**
-     * List one page of credit notes, newest first.
+     * One page of credit notes, newest first.
      *
-     * `invoice_id` answers "was this sale credited, and by how much",
-     * which is the question when reconciling a single invoice;
+     * `invoice_id` answers "was this sale credited, and by how much";
      * `customer_id` answers it for everything credited to one buyer.
      *
-     * @param array<string, scalar|null> $params
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @return array<string, mixed>
+     * @return Collection<CreditNote>
      */
-    public function all(array $params = []): array
+    public function all(array $params = [], array $opts = []): Collection
     {
-        return $this->get('/v1/credit_notes', $params);
+        return $this->getList('/v1/credit_notes', $params, $opts, CreditNote::class);
     }
 
     /**
-     * Yield every credit note across all pages, optionally narrowed to
-     * one invoice or one customer.
+     * Every item across all pages.
      *
-     * @return \Generator<int, mixed>
+     * Takes the same `$params` as {@see self::all()}; the filters are carried
+     * onto every page request, so a filtered walk narrows server-side. `limit`
+     * sets the page size.
+     *
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return \Generator<int, CreditNote>
      */
-    public function autoPagingIterator(
-        ?int $pageSize = null,
-        ?string $invoiceId = null,
-        ?string $customerId = null,
-    ): \Generator {
-        yield from Collection::autoPagingIterator(
-            fn (array $p): array => $this->get('/v1/credit_notes', $p),
-            $pageSize,
-            [
-                'invoice_id' => $invoiceId,
-                'customer_id' => $customerId,
-            ],
-        );
+    public function autoPagingIterator(array $params = [], array $opts = []): \Generator
+    {
+        yield from $this->all($params, $opts)->autoPagingIterator();
     }
 }

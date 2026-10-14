@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BillKit;
 
 use BillKit\Exception\WebhookVerificationException;
+use BillKit\Model\Event;
 
 /**
  * Verify ``BillKit-Signature: t=<unix>,v1=<hex>`` webhook headers.
@@ -19,6 +20,11 @@ use BillKit\Exception\WebhookVerificationException;
  *      (replay protection).
  *   3. Compute ``HMAC-SHA256("{t}." + body, secret)`` and compare against
  *      each supplied ``v1`` in constant time.
+ *
+ * The verified body is decoded into a typed event: `SubscriptionUpdatedEvent`
+ * for `subscription.updated`, and so on for every type this SDK version
+ * knows, or a plain {@see Event} for one it does not. A new event type is
+ * never an error; ignore what you do not handle.
  */
 final class Webhooks
 {
@@ -27,10 +33,21 @@ final class Webhooks
     private const V1_HEX_LENGTH = 64;
 
     /**
-     * @param int|null $now Injectable clock (unix seconds) for tests.
+     * The most digits a real ``t=`` carries. Ten digits of unix seconds last
+     * until the year 2286; anything longer is not a timestamp the server
+     * wrote, and past 19 digits PHP's ``(int)`` saturates at PHP_INT_MAX
+     * rather than failing.
+     */
+    private const MAX_TIMESTAMP_DIGITS = 10;
+
+    /**
+     * @param string   $secret the endpoint's signing secret (`bkwhsec_...`); never empty
+     * @param int|null $now    Injectable clock (unix seconds) for tests.
      *
-     * @return array<string, mixed> The decoded, verified event payload.
+     * @return Event the verified event, as its typed subclass when the type is known
      *
+     * @throws \InvalidArgumentException  when `$secret` is empty or whitespace, or `$toleranceSeconds` is negative:
+     *                                     a configuration fault, not a bad request
      * @throws WebhookVerificationException on any verification failure.
      */
     public static function verifySignature(
@@ -39,7 +56,21 @@ final class Webhooks
         string $secret,
         int $toleranceSeconds = self::DEFAULT_TOLERANCE_SECONDS,
         ?int $now = null,
-    ): array {
+    ): Event {
+        // An empty secret is a deployment that never loaded its secret (an
+        // unset env var). HMAC with an empty key is still a valid HMAC, so
+        // without this anyone who reads the scheme could sign a payload the
+        // endpoint accepts. It throws a different class from a bad request
+        // on purpose: this is the app's fault, and it must not be swallowed
+        // by the handler that answers forged webhooks with a 400.
+        if (trim($secret) === '') {
+            throw new \InvalidArgumentException(
+                'BillKit: the webhook signing secret is empty. Pass the endpoint\'s bkwhsec_... secret.',
+            );
+        }
+        if ($toleranceSeconds < 0) {
+            throw new \InvalidArgumentException('BillKit: the webhook tolerance is a number of seconds, 0 or more.');
+        }
         if ($signatureHeader === null || $signatureHeader === '') {
             throw new WebhookVerificationException('Missing BillKit-Signature header.');
         }
@@ -75,16 +106,11 @@ final class Webhooks
         } catch (\JsonException $err) {
             throw new WebhookVerificationException('Webhook body is not valid JSON: ' . $err->getMessage());
         }
-        if (!is_array($decoded)) {
+        if (!is_array($decoded) || !str_starts_with(ltrim($payload), '{')) {
             throw new WebhookVerificationException('Webhook body is not a JSON object.');
         }
 
-        $event = [];
-        foreach ($decoded as $key => $value) {
-            $event[(string) $key] = $value;
-        }
-
-        return $event;
+        return Event::constructFrom($decoded);
     }
 
     /**
@@ -114,8 +140,13 @@ final class Webhooks
         // ``ctype_digit`` already refuses a sign, so a negative ``t`` never
         // gets this far; ``0`` would, and it is refused here rather than
         // several lines later by the tolerance window, so the message names
-        // the real fault and matches node's wording.
-        if (!ctype_digit($timestamp) || (int) $timestamp <= 0) {
+        // the real fault and matches node's wording. A run of digits longer
+        // than any real timestamp is refused for the same reason.
+        if (
+            !ctype_digit($timestamp)
+            || strlen($timestamp) > self::MAX_TIMESTAMP_DIGITS
+            || (int) $timestamp <= 0
+        ) {
             throw new WebhookVerificationException("Malformed timestamp in BillKit-Signature: {$timestamp}");
         }
 

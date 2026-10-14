@@ -11,11 +11,11 @@
     "support": {
         "issues": "https://github.com/billkit-eu/billkit-php/issues",
         "source": "https://github.com/billkit-eu/billkit-php",
-        "docs": "https://docs.billkit.eu"
+        "docs": "https://docs.billkit.eu",
+        "security": "https://docs.billkit.eu/docs/security"
     },
     "require": {
-        "php": ">=8.1",
-        "ext-curl": "*",
+        "php": "^8.1",
         "ext-json": "*",
         "psr/http-client": "^1.0",
         "psr/http-factory": "^1.0",
@@ -28,7 +28,7 @@
         "nyholm/psr7": "^1.8"
     },
     "suggest": {
-        "php-http/discovery": "Auto-wire a PSR-18 HTTP client + PSR-17 factories instead of the bundled curl transport."
+        "ext-curl": "Needed by the bundled transport. Not needed when you inject a PSR-18 client and PSR-17 factories."
     },
     "autoload": {
         "psr-4": { "BillKit\\": "src/" }
@@ -39,6 +39,7 @@
     "scripts": {
         "test": "phpunit",
         "analyse": "phpstan analyse --memory-limit=1G",
+        "generate": "php tools/generate-models.php",
         "cs": "php-cs-fixer fix --diff",
         "cs:check": "php-cs-fixer fix --dry-run --diff"
     },

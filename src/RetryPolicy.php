@@ -7,7 +7,9 @@ namespace BillKit;
 /**
  * Retry policy for transient failures.
  *
- * Retries 5xx + connection errors with jittered exponential backoff.
+ * Retries 5xx + connection errors with jittered exponential backoff, except
+ * ``501 Not Implemented``: the server is saying it does not support the
+ * request at all, and asking again cannot change that answer.
  * 4xx are caller-fault and never retried, with one deliberate exception:
  * ``409 idempotency_in_progress``. See {@see self::IN_PROGRESS_CODE}.
  *
@@ -17,6 +19,10 @@ namespace BillKit;
  * Behaviour is a straight port of the Node SDK's ``retry.ts``: same defaults,
  * same backoff formula, and the same 429/``Retry-After`` and
  * ``409 idempotency_in_progress`` decisions.
+ *
+ * Construct one to tune the client (`new BillKitClient(retryPolicy: new
+ * RetryPolicy(maxAttempts: 2))`) or use the `max_retries` request option for
+ * one call. The two decision methods are internal to the transport.
  */
 final class RetryPolicy
 {
@@ -27,8 +33,8 @@ final class RetryPolicy
      * ``Idempotency-Key`` is still in flight ("Retry after a short delay",
      * ``Retry-After: 1``). It is the only 4xx where doing nothing is the
      * dangerous option: the call may well have charged the customer, the
-     * caller cannot see the outcome, and the obvious workaround — retry with
-     * a *fresh* key — is precisely what turns one charge into two.
+     * caller cannot see the outcome, and the obvious workaround (retry with
+     * a *fresh* key) is precisely what turns one charge into two.
      *
      * Retrying is safe because the transport reuses the original
      * ``Idempotency-Key`` on every attempt, so the retry either loses the
@@ -44,11 +50,34 @@ final class RetryPolicy
         public readonly ?int $maxRetryAfterMs = 30_000,
         public readonly float $jitter = 0.25,
     ) {
+        if ($maxAttempts < 1) {
+            throw new \InvalidArgumentException('BillKit: RetryPolicy needs maxAttempts of at least 1.');
+        }
+    }
+
+    /**
+     * This policy with a different attempt budget; how the `max_retries`
+     * request option is applied to one call.
+     *
+     * @internal
+     */
+    public function withMaxAttempts(int $maxAttempts): self
+    {
+        return new self(
+            $maxAttempts,
+            $this->initialBackoffMs,
+            $this->backoffMultiplier,
+            $this->maxBackoffMs,
+            $this->maxRetryAfterMs,
+            $this->jitter,
+        );
     }
 
     /**
      * Backoff before attempt ``$attempt`` (1-indexed: attempt 2 is the
      * first retry). Callers never ask for attempt=1.
+     *
+     * @internal
      */
     public function backoffForMs(int $attempt): float
     {
@@ -65,6 +94,8 @@ final class RetryPolicy
     /**
      * ``$errorCode`` is the envelope's ``error.code``, and is consulted for
      * 409s only; every other decision is status-driven.
+     *
+     * @internal
      */
     public function shouldRetry(
         ?int $status,
@@ -95,6 +126,8 @@ final class RetryPolicy
             return $this->maxRetryAfterMs === null || $retryAfterMs <= $this->maxRetryAfterMs;
         }
 
-        return $status >= 500;
+        // 501 is a permanent answer about the request, not a transient
+        // failure of the server, so it fails fast like a 4xx.
+        return $status >= 500 && $status !== 501;
     }
 }

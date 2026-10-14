@@ -5,98 +5,89 @@ declare(strict_types=1);
 namespace BillKit\Resource;
 
 use BillKit\Collection;
+use BillKit\Model\OneShotPayment;
 
 /**
- * Mandate-less, one-off payments (Stripe PaymentIntent shape).
+ * One-off, mandate-less payments.
  *
- * A one-shot payment charges a customer a single time without creating a
- * reusable mandate: there is no subscription, no renewal, and nothing is
- * stored for future off-session use. Use it for one-time purchases, either
- * through Mollie's hosted page or embedded in your own page.
+ * @internal constructed by {@see \BillKit\BillKitClient}; use `$client->oneShotPayments`.
  */
 final class OneShotPayments extends BaseResource
 {
     /**
-     * Create a one-shot (mandate-less) payment.
+     * Create a one-shot payment: a single charge with no stored mandate, so it
+     * can never be replayed later.
      *
-     * Hosted (``ui_mode`` omitted or ``"hosted"``, the default) needs a
-     * ``method``: the created object has ``"object": "one_shot_payment"`` and a
-     * ``redirect_url``. Send the shopper there to complete the payment.
+     * Hosted (the default) needs a `payment_method`, and the response has a
+     * `redirect_url` to send the buyer to. Embedded (`'ui_mode' => 'embedded'`)
+     * is sent WITHOUT `payment_method`: the response carries a short-lived
+     * `client_secret` for the browser payment element, where the buyer picks the
+     * method. The secret is on this response only. The server refuses a wrong
+     * `payment_method` / `ui_mode` combination with a 400.
      *
-     * Embedded (``'ui_mode' => 'embedded'``) must be sent WITHOUT ``method``.
-     * No provider payment is created yet; the response carries a short-lived
-     * ``client_secret`` (and a null ``redirect_url``) for the browser payment
-     * element (``mountOneShotPaymentElement`` in ``@billkit-eu/js``), where the
-     * shopper picks the method. ``method`` stays null until they confirm,
-     * ``expires_at`` is when the secret and the unconfirmed charge lapse, and
-     * the secret is on the create response only: a retrieve reads it as null.
-     * The server refuses a wrong ``method``/``ui_mode`` combination with a 422.
-     *
-     * Because no mandate is created, the charge cannot be replayed later.
-     *
-     * ``refund_window_days`` controls how long the payment stays refundable:
-     * ``0`` disables refunds entirely, the default is ``30``, and the maximum
-     * is ``365``. It reaches a terminal state via the
-     * ``one_shot_payment.succeeded`` / ``one_shot_payment.failed`` webhooks.
-     *
-     * To refund a settled one-shot payment, call
-     * ``$client->refunds->create(['one_shot_payment_id' => $id])``.
+     * `refund_window_days` is how long the payment stays refundable: `0`
+     * disables refunds, the default is `30`, the maximum `365`. The payment
+     * settles through the `one_shot_payment.succeeded` /
+     * `one_shot_payment.failed` webhooks; `banktransfer` takes days, not
+     * seconds. Refund one with `$client->refunds->create(['one_shot_payment_id'
+     * => $id])`.
      *
      * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @return array<string, mixed>
+     * @return OneShotPayment
      */
-    public function create(array $params): array
+    public function create(array $params = [], array $opts = []): OneShotPayment
     {
-        return $this->post('/v1/checkout/one_shot', $params);
+        return $this->postObject('/v1/checkout/one_shot', $params, $opts, OneShotPayment::class);
     }
 
     /**
-     * Fetch a single one-shot payment by id.
+     * One one-shot payment.
      *
-     * @return array<string, mixed>
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return OneShotPayment
      */
-    public function retrieve(string $id): array
+    public function retrieve(string $id, array $params = [], array $opts = []): OneShotPayment
     {
-        return $this->get('/v1/checkout/one_shot/' . self::p($id));
+        return $this->getObject('/v1/checkout/one_shot/' . self::p($id), $params, $opts, OneShotPayment::class);
     }
 
     /**
-     * List one page of one-shot payments, newest first. Use
-     * {@see self::autoPagingIterator()} to walk every page.
+     * One page of one-shot payments, newest first.
      *
-     * ``customer_id`` narrows to one buyer's charges and ``status`` to one
-     * of ``open``, ``pending``, ``authorized``, ``paid``, ``failed``,
-     * ``canceled``, ``expired`` or ``refunded``; any other status throws
-     * {@see \BillKit\Exception\InvalidRequestException}. Failed, expired
-     * and still-open charges are listed, so read ``status`` before treating
-     * a row as revenue. Subscription payments are not here; they are in
+     * `customer_id` narrows to one buyer and `status` to one of `open`,
+     * `pending`, `authorized`, `paid`, `failed`, `canceled`, `expired` or
+     * `refunded`. Failed, expired and still-open charges are listed, so read
+     * `status` before treating a row as revenue. Subscription payments are in
      * {@see Payments::all()}.
      *
-     * @param array<string, scalar|list<string>|null> $params
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @return array<string, mixed>
+     * @return Collection<OneShotPayment>
      */
-    public function all(array $params = []): array
+    public function all(array $params = [], array $opts = []): Collection
     {
-        return $this->get('/v1/checkout/one_shot', $params);
+        return $this->getList('/v1/checkout/one_shot', $params, $opts, OneShotPayment::class);
     }
 
     /**
-     * Yield every one-shot payment across all pages. Both filters are
-     * carried onto every page request.
+     * Every item across all pages.
      *
-     * @return \Generator<int, mixed>
+     * Takes the same `$params` as {@see self::all()}; the filters are carried
+     * onto every page request, so a filtered walk narrows server-side. `limit`
+     * sets the page size.
+     *
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return \Generator<int, OneShotPayment>
      */
-    public function autoPagingIterator(
-        ?int $pageSize = null,
-        ?string $customerId = null,
-        ?string $status = null,
-    ): \Generator {
-        yield from Collection::autoPagingIterator(
-            fn (array $p): array => $this->get('/v1/checkout/one_shot', $p),
-            $pageSize,
-            ['customer_id' => $customerId, 'status' => $status],
-        );
+    public function autoPagingIterator(array $params = [], array $opts = []): \Generator
+    {
+        yield from $this->all($params, $opts)->autoPagingIterator();
     }
 }

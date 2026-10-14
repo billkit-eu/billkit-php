@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace BillKit\Exception;
 
-/** 401: missing or invalid API key. */
-class AuthenticationException extends BillKitException
+/**
+ * 401: the API key is missing, malformed or revoked.
+ */
+class AuthenticationException extends ApiException
 {
 }

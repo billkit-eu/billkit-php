@@ -5,71 +5,86 @@ declare(strict_types=1);
 namespace BillKit\Resource;
 
 use BillKit\Collection;
+use BillKit\Model\TaxRate;
 
-/** Per-country tax rates applied to invoices. */
+/**
+ * Tax rates: the VAT percentage applied per country.
+ *
+ * @internal constructed by {@see \BillKit\BillKitClient}; use `$client->taxRates`.
+ */
 final class TaxRates extends BaseResource
 {
     /**
      * Create a tax rate for a country.
      *
      * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @return array<string, mixed>
+     * @return TaxRate
      */
-    public function create(array $params): array
+    public function create(array $params = [], array $opts = []): TaxRate
     {
-        return $this->post('/v1/tax_rates', $params);
+        return $this->postObject('/v1/tax_rates', $params, $opts, TaxRate::class);
     }
 
     /**
-     * Fetch a single tax rate by id.
-     *
-     * @return array<string, mixed>
-     */
-    public function retrieve(string $id): array
-    {
-        return $this->get('/v1/tax_rates/' . self::p($id));
-    }
-
-    /**
-     * Patch mutable fields on a tax rate.
-     *
-     * ``['display_name' => null]`` is sent as an explicit JSON null and
-     * removes the display name; leave the key out to keep it. Other
-     * ``null`` values are stripped.
+     * One tax rate.
      *
      * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @return array<string, mixed>
+     * @return TaxRate
      */
-    public function update(string $id, array $params): array
+    public function retrieve(string $id, array $params = [], array $opts = []): TaxRate
     {
-        return $this->postClearable('/v1/tax_rates/' . self::p($id), $params, ['display_name']);
+        return $this->getObject('/v1/tax_rates/' . self::p($id), $params, $opts, TaxRate::class);
     }
 
     /**
-     * List one page of tax rates. Use {@see self::autoPagingIterator()} to
-     * walk every page.
+     * Change a tax rate.
      *
-     * @param array<string, scalar|null> $params
+     * `['display_name' => null]` is sent as an explicit JSON null and removes
+     * the display name; leave the key out to keep it. Other `null` values are
+     * dropped. `['active' => false]` retires the rate; it stays readable,
+     * because issued invoices record what it produced.
      *
-     * @return array<string, mixed>
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return TaxRate
      */
-    public function all(array $params = []): array
+    public function update(string $id, array $params = [], array $opts = []): TaxRate
     {
-        return $this->get('/v1/tax_rates', $params);
+        return $this->postObject('/v1/tax_rates/' . self::p($id), $params, $opts, TaxRate::class, ['display_name']);
     }
 
     /**
-     * Yield every tax rate across all pages.
+     * One page of tax rates.
      *
-     * @return \Generator<int, mixed>
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return Collection<TaxRate>
      */
-    public function autoPagingIterator(?int $pageSize = null): \Generator
+    public function all(array $params = [], array $opts = []): Collection
     {
-        yield from Collection::autoPagingIterator(
-            fn (array $p): array => $this->get('/v1/tax_rates', $p),
-            $pageSize,
-        );
+        return $this->getList('/v1/tax_rates', $params, $opts, TaxRate::class);
+    }
+
+    /**
+     * Every item across all pages.
+     *
+     * Takes the same `$params` as {@see self::all()}; the filters are carried
+     * onto every page request, so a filtered walk narrows server-side. `limit`
+     * sets the page size.
+     *
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return \Generator<int, TaxRate>
+     */
+    public function autoPagingIterator(array $params = [], array $opts = []): \Generator
+    {
+        yield from $this->all($params, $opts)->autoPagingIterator();
     }
 }

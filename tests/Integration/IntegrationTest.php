@@ -5,13 +5,25 @@ declare(strict_types=1);
 namespace BillKit\Tests\Integration;
 
 use BillKit\BillKitClient;
+use BillKit\BillKitObject;
+use BillKit\EventType;
 use BillKit\Exception\AuthenticationException;
 use BillKit\Exception\ConflictException;
 use BillKit\Exception\InvalidRequestException;
-use BillKit\Exception\PermissionException;
-use BillKit\Exception\ResourceMissingException;
+use BillKit\Exception\NotFoundException;
+use BillKit\Exception\PermissionDeniedException;
 use BillKit\Exception\ServerException;
 use BillKit\Exception\WebhookVerificationException;
+use BillKit\Model\CheckoutSession;
+use BillKit\Model\Coupon;
+use BillKit\Model\Customer;
+use BillKit\Model\CustomerCreatedEvent;
+use BillKit\Model\OneShotPayment;
+use BillKit\Model\Payment;
+use BillKit\Model\Price;
+use BillKit\Model\Product;
+use BillKit\Model\Subscription;
+use BillKit\Model\SubscriptionUpdatedEvent;
 use BillKit\Webhooks;
 use PHPUnit\Framework\TestCase;
 
@@ -46,13 +58,14 @@ final class IntegrationTest extends TestCase
         'crud.price_archive',
         'crud.product_default_price',
         'crud.customer',
+        'crud.test_clock',
         'crud.coupon',
         'crud.tax_rate',
         'crud.webhook_endpoint',
         'crud.price_decimal_rate',
         'crud.price_tiered',
         'crud.price_update_fields',
-        'crud.coupon_discount_type_literals',
+        'crud.coupon_percent_off',
         'crud.credit_note_absent_until_refunded',
         'crud.nullable_fields_clear',
         'routes.one_shot_list',
@@ -63,6 +76,8 @@ final class IntegrationTest extends TestCase
         'filters.audit_resource_id',
         'filters.expand',
         'customers.vat_number_clear',
+        'safety.purge_requires_confirmation',
+        'events.previous_attributes_nullable',
         'routes.api_keys',
         'routes.event_types',
         'routes.tenant_billing_profile',
@@ -71,6 +86,7 @@ final class IntegrationTest extends TestCase
         'idempotency.replay',
         'idempotency.key_reuse_conflict',
         'idempotency.in_progress_converges',
+        'idempotency.blank_key_generated',
         'errors.not_found',
         'errors.invalid_request',
         'errors.status_drives_class',
@@ -88,6 +104,7 @@ final class IntegrationTest extends TestCase
         'webhooks.verify_roundtrip',
         'webhooks.reject_tampered',
         'webhooks.reject_stale',
+        'webhooks.event_type_constants',
         'methods.recurring_vocabulary',
         'methods.one_shot_vocabulary',
         'methods.banktransfer_settles_in_days',
@@ -131,7 +148,7 @@ final class IntegrationTest extends TestCase
     /**
      * A product + price pair the money specs charge against.
      *
-     * @return array{product: array<string, mixed>, price: array<string, mixed>}
+     * @return array{product: Product, price: Price}
      */
     private function makePlan(BillKitClient $c, int $amountCents = 2500, ?string $usageType = null): array
     {
@@ -152,10 +169,8 @@ final class IntegrationTest extends TestCase
      *
      * Same machinery as the money specs: checkout -> settle at the fake
      * Mollie -> deliver the webhook, then find the subscription by price.
-     *
-     * @return array<string, mixed>
      */
-    private function activeSubscription(BillKitClient $c, string $priceId): array
+    private function activeSubscription(BillKitClient $c, string $priceId): Subscription
     {
         $this->checkoutToActive($c, $priceId);
         $sub = $this->findSubscription($c, $priceId);
@@ -173,7 +188,7 @@ final class IntegrationTest extends TestCase
      * webhook delivered before the settle would correctly observe `open` and
      * do nothing.
      *
-     * @return array{session: array<string, mixed>, provider_payment_id: string}
+     * @return array{session: CheckoutSession, provider_payment_id: string}
      */
     private function checkoutToActive(BillKitClient $c, string $priceId): array
     {
@@ -190,8 +205,7 @@ final class IntegrationTest extends TestCase
         return ['session' => $session, 'provider_payment_id' => $providerPaymentId];
     }
 
-    /** @return array<string, mixed> */
-    private function findSubscription(BillKitClient $c, string $priceId): array
+    private function findSubscription(BillKitClient $c, string $priceId): Subscription
     {
         foreach ($c->subscriptions->all(['limit' => 100])['data'] as $row) {
             if ($row['price_id'] === $priceId) {
@@ -201,8 +215,7 @@ final class IntegrationTest extends TestCase
         self::fail("no subscription found for price {$priceId}");
     }
 
-    /** @return array<string, mixed> */
-    private function findPayment(BillKitClient $c, string $subscriptionId): array
+    private function findPayment(BillKitClient $c, string $subscriptionId): Payment
     {
         foreach ($c->payments->all(['limit' => 100])['data'] as $row) {
             if ($row['subscription_id'] === $subscriptionId) {
@@ -233,7 +246,7 @@ final class IntegrationTest extends TestCase
         $scoped = $this->client($secret);
         self::assertSame('list', $scoped->products->all()['object']);
 
-        $this->expectException(PermissionException::class);
+        $this->expectException(PermissionDeniedException::class);
         $scoped->customers->all();
     }
 
@@ -385,8 +398,7 @@ final class IntegrationTest extends TestCase
 
         $coupon = $c->coupons->create([
             'code' => 'CLEAR' . substr((string) time(), -8),
-            'discount_type' => 'percent',
-            'discount_value' => 10,
+            'percent_off' => 10,
             'duration' => 'once',
             'max_redemptions' => 5,
             'redeem_by' => time() + 86400 * 30,
@@ -439,34 +451,47 @@ final class IntegrationTest extends TestCase
         self::assertSame(1500, $fetched['amount_cents']);
     }
 
-    public function testCrudCouponDiscountTypeLiterals(): void
+    /**
+     * API 1.0 split the overloaded `discount_value` (whole percent or minor
+     * units, depending on `discount_type`) into `percent_off` and
+     * `amount_off_cents`, and renamed `fixed_cents` to `fixed_amount`.
+     */
+    public function testCrudCouponPercentOff(): void
     {
         $c = $this->client();
 
         $percent = $c->coupons->create([
             'code' => 'PCT' . substr(IntegrationHarness::idemKey(), -10),
-            'discount_type' => 'percent',
-            'discount_value' => 10,
+            'percent_off' => 10,
             'duration' => 'once',
         ]);
-        self::assertSame('percent', $percent['discount_type']);
+        self::assertSame(10.0, $percent->percent_off);
+        self::assertSame(Coupon::DISCOUNT_TYPE_PERCENT, $percent->discount_type);
+        self::assertNull($percent->amount_off_cents);
+
+        $read = $c->coupons->retrieve($percent->id);
+        self::assertSame(10.0, $read->percent_off);
+        self::assertNull($read->amount_off_cents);
+
+        // A fractional percentage, up to two decimal places, is a number
+        // both ways: on create and on a later retrieve.
+        $fractional = $c->coupons->create([
+            'code' => 'FRC' . substr(IntegrationHarness::idemKey(), -10),
+            'percent_off' => 12.5,
+        ]);
+        self::assertSame(12.5, $fractional->percent_off);
+        self::assertSame(12.5, $fractional['percent_off']);
+        self::assertSame(12.5, $c->coupons->retrieve((string) $fractional->id)->percent_off);
 
         $fixed = $c->coupons->create([
             'code' => 'FIX' . substr(IntegrationHarness::idemKey(), -10),
-            'discount_type' => 'fixed_cents',
-            'discount_value' => 500,
+            'amount_off_cents' => 500,
+            'currency' => 'EUR',
             'duration' => 'once',
         ]);
-        self::assertSame('fixed_cents', $fixed['discount_type']);
-
-        // The value these SDKs used to document. It is not a synonym.
-        $this->expectException(InvalidRequestException::class);
-        $c->coupons->create([
-            'code' => 'BAD' . substr(IntegrationHarness::idemKey(), -10),
-            'discount_type' => 'percentage',
-            'discount_value' => 10,
-            'duration' => 'once',
-        ]);
+        self::assertSame(Coupon::DISCOUNT_TYPE_FIXED_AMOUNT, $fixed->discount_type);
+        self::assertSame(500, $fixed->amount_off_cents);
+        self::assertNull($fixed->percent_off);
     }
 
     public function testCrudCustomer(): void
@@ -484,11 +509,44 @@ final class IntegrationTest extends TestCase
         $deleted = $c->customers->delete((string) $created['id']);
         self::assertSame(
             ['id' => $created['id'], 'object' => 'customer', 'deleted' => true],
-            $deleted,
+            $deleted->toArray(),
         );
 
         $page = $c->customers->all(['limit' => 100]);
         self::assertNotContains($created['id'], array_column($page['data'], 'id'));
+    }
+
+    public function testCrudTestClock(): void
+    {
+        $c = $this->client();
+        $start = time();
+        $clock = $c->testClocks->create(['frozen_time' => $start, 'name' => 'SDK IT']);
+        $id = (string) $clock['id'];
+        self::assertSame('test_clock', $clock['object']);
+        self::assertSame($start, $clock['frozen_time']);
+
+        self::assertSame($id, $c->testClocks->retrieve($id)['id']);
+        self::assertContains($id, array_column($c->testClocks->all(['limit' => 100])['data'], 'id'));
+
+        $customer = $c->customers->create([
+            'email' => 'clock-' . IntegrationHarness::idemKey() . '@sdk-it.example.com',
+            'test_clock_id' => $id,
+        ]);
+        self::assertSame($id, $customer->test_clock_id);
+        self::assertFalse($customer->has('test_clock'));
+        $reread = $c->customers->retrieve((string) $customer->id);
+        self::assertSame($id, $reread->test_clock_id);
+        self::assertFalse($reread->has('test_clock'));
+
+        $advanced = $c->testClocks->advance($id, ['frozen_time' => $start + 86400]);
+        self::assertSame($start + 86400, $advanced['frozen_time']);
+
+        self::assertSame(
+            ['id' => $id, 'object' => 'test_clock', 'deleted' => true],
+            $c->testClocks->delete($id)->toArray(),
+        );
+        $this->expectException(NotFoundException::class);
+        $c->testClocks->retrieve($id);
     }
 
     public function testCrudCoupon(): void
@@ -497,8 +555,7 @@ final class IntegrationTest extends TestCase
         $code = 'SAVE' . substr((string) time(), -8);
         $created = $c->coupons->create([
             'code' => $code,
-            'discount_type' => 'percent',
-            'discount_value' => 25,
+            'percent_off' => 25,
             'duration' => 'once',
         ]);
         self::assertSame($code, $created['code']);
@@ -568,12 +625,12 @@ final class IntegrationTest extends TestCase
         $gone = $c->webhookEndpoints->delete((string) $created['id']);
         self::assertSame(
             ['id' => $created['id'], 'object' => 'webhook_endpoint', 'deleted' => true],
-            $gone,
+            $gone->toArray(),
         );
         $after = $c->webhookEndpoints->all(['limit' => 100]);
         self::assertNotContains($created['id'], array_column($after['data'], 'id'));
 
-        $this->expectException(ResourceMissingException::class);
+        $this->expectException(NotFoundException::class);
         $c->webhookEndpoints->retrieve((string) $created['id']);
     }
 
@@ -636,12 +693,12 @@ final class IntegrationTest extends TestCase
     public function testCrudCreditNoteAbsentUntilRefunded(): void
     {
         $c = $this->client();
-        // There is no `create` on the resource at all — issuance hangs off a
+        // There is no `create` on the resource at all, issuance hangs off a
         // settled refund. Assert the read surface is reachable and honest
         // about having nothing yet.
         self::assertSame('list', $c->creditNotes->all(['limit' => 10])['object']);
 
-        $this->expectException(ResourceMissingException::class);
+        $this->expectException(NotFoundException::class);
         $c->creditNotes->retrieve('cn_does_not_exist');
     }
 
@@ -659,18 +716,30 @@ final class IntegrationTest extends TestCase
         self::assertSame('paused', $paused['renewal_state']);
         self::assertSame('active', $paused['status']);
 
-        $byRenewalState = $c->subscriptions->all(['renewal_state' => 'paused', 'limit' => 100]);
+        $byRenewalState = $c->subscriptions->all(['renewal_state' => ['paused'], 'limit' => 100]);
         self::assertContains($sub['id'], array_column($byRenewalState['data'], 'id'));
 
         // ...and it is still an `active` subscription to the status filter.
-        $byStatus = $c->subscriptions->all(['status' => 'active', 'limit' => 100]);
+        $byStatus = $c->subscriptions->all(['status' => ['active'], 'limit' => 100]);
         self::assertContains($sub['id'], array_column($byStatus['data'], 'id'));
+
+        // Both filters take a list, sent comma-joined, and match any value.
+        $both = $c->subscriptions->all(['renewal_state' => ['paused'], 'status' => ['active'], 'limit' => 100]);
+        self::assertContains($sub['id'], array_column($both['data'], 'id'));
+        $either = $c->subscriptions->all([
+            'status' => ['past_due', 'active'],
+            'renewal_state' => ['canceling', 'paused'],
+            'limit' => 100,
+        ]);
+        self::assertContains($sub['id'], array_column($either['data'], 'id'));
+        $neither = $c->subscriptions->all(['renewal_state' => ['auto_renew', 'canceling'], 'limit' => 100]);
+        self::assertNotContains($sub['id'], array_column($neither['data'], 'id'));
 
         // `status=paused` is not a value the API accepts. It used to be, and
         // returned a confident, wrong, empty page; now it is refused so the
         // mistake is visible.
         try {
-            $c->subscriptions->all(['status' => 'paused']);
+            $c->subscriptions->all(['status' => ['paused']]);
             self::fail('status=paused should be rejected');
         } catch (InvalidRequestException $e) {
             self::assertSame('status', $e->param);
@@ -718,7 +787,7 @@ final class IntegrationTest extends TestCase
         $page = $c->products->all(['expand' => ['prices'], 'limit' => 100]);
         $rows = array_values(array_filter(
             $page['data'],
-            static fn (array $row): bool => $row['id'] === $product['id'],
+            static fn (BillKitObject $row): bool => $row['id'] === $product['id'],
         ));
         self::assertCount(1, $rows);
         self::assertContains($price['id'], array_column($rows[0]['prices'], 'id'));
@@ -817,7 +886,7 @@ final class IntegrationTest extends TestCase
         $after = $c->apiKeys->all(['limit' => 100])['data'];
         $row = array_values(array_filter(
             $after,
-            static fn (array $k): bool => $k['id'] === $created['id'],
+            static fn (BillKitObject $k): bool => $k['id'] === $created['id'],
         ));
         self::assertNotEmpty($row[0]['revoked_at']);
     }
@@ -857,7 +926,7 @@ final class IntegrationTest extends TestCase
         self::assertSame('NL', $stored['country_code']);
         self::assertSame('NL123456789B01', $stored['vat_id']);
 
-        $read = $c->tenant->billingProfile();
+        $read = $c->tenant->retrieveBillingProfile();
         self::assertSame('NL123456789B01', $read['vat_id']);
         // Stored and effective agree once something is stored; they differ
         // only when nothing ever was.
@@ -883,7 +952,7 @@ final class IntegrationTest extends TestCase
         }
 
         // The refused call wrote nothing, including the city it carried.
-        $after = $c->tenant->billingProfile();
+        $after = $c->tenant->retrieveBillingProfile();
         self::assertSame('NL123456789B01', $after['vat_id']);
         self::assertSame('Amsterdam', $after['city']);
 
@@ -919,7 +988,7 @@ final class IntegrationTest extends TestCase
         }
 
         $seen = [];
-        foreach ($c->products->autoPagingIterator(2) as $product) {
+        foreach ($c->products->autoPagingIterator(['limit' => 2]) as $product) {
             $seen[] = $product['id'];
         }
 
@@ -937,19 +1006,33 @@ final class IntegrationTest extends TestCase
     {
         $c = $this->client();
         $key = IntegrationHarness::idemKey();
-        $first = $c->products->create(['name' => 'Idempotent Product', 'idempotency_key' => $key]);
-        $second = $c->products->create(['name' => 'Idempotent Product', 'idempotency_key' => $key]);
+        $first = $c->products->create(['name' => 'Idempotent Product'], ['idempotency_key' => $key]);
+        $second = $c->products->create(['name' => 'Idempotent Product'], ['idempotency_key' => $key]);
         self::assertSame($first['id'], $second['id']);
+    }
+
+    /**
+     * A blank key on the wire is a 400 now, and before that it meant "no
+     * idempotency" while the SDK still retried the POST. Each call here gets
+     * its own generated key, so both succeed as two products.
+     */
+    public function testIdempotencyBlankKeyGenerated(): void
+    {
+        $c = $this->client();
+        $first = $c->products->create(['name' => 'Blank Key'], ['idempotency_key' => '']);
+        $second = $c->products->create(['name' => 'Blank Key'], ['idempotency_key' => '   ']);
+        self::assertNotEmpty($first['id']);
+        self::assertNotSame($first['id'], $second['id']);
     }
 
     public function testIdempotencyKeyReuseConflict(): void
     {
         $c = $this->client();
         $key = IntegrationHarness::idemKey();
-        $c->products->create(['name' => 'First Body', 'idempotency_key' => $key]);
+        $c->products->create(['name' => 'First Body'], ['idempotency_key' => $key]);
 
         $this->expectException(ConflictException::class);
-        $c->products->create(['name' => 'Different Body', 'idempotency_key' => $key]);
+        $c->products->create(['name' => 'Different Body'], ['idempotency_key' => $key]);
     }
 
     /**
@@ -957,7 +1040,7 @@ final class IntegrationTest extends TestCase
      * several workers yields ONE resource and no exception.
      *
      * A request that arrives while another holder of the key is still
-     * running gets `409 idempotency_in_progress` — the one 4xx the client
+     * running gets `409 idempotency_in_progress`, the one 4xx the client
      * retries, because the charge may already have happened and the obvious
      * workaround (retry with a fresh key) is what turns one charge into two.
      *
@@ -971,7 +1054,7 @@ final class IntegrationTest extends TestCase
      * raw curl does not retry, so a handle that landed inside the in-flight
      * window answered 409 and the assertion called correct server behaviour
      * a failure. Racing 12 same-key creates at a live server returns a mix of
-     * 200 and 409 on most trials, so this was a red flake waiting on load —
+     * 200 and 409 on most trials, so this was a red flake waiting on load.
      * and `SCENARIOS.md` promises this scenario "never flakes red".
      *
      * So the assertion is the one node and python make, which is the one the
@@ -985,7 +1068,7 @@ final class IntegrationTest extends TestCase
      * the in-flight window was never entered in 12 consecutive local runs;
      * at 8 it was entered in every one of 5, and the pre-fix assertion
      * failed 3 out of 3 there. 8 would therefore make the race
-     * deterministic — and is not used, because the API pool is
+     * deterministic, and is not used, because the API pool is
      * `DB_POOL_SIZE 5 + DB_POOL_MAX_OVERFLOW 5`, so 8 racers plus the SDK's
      * own create leaves exactly one spare connection. Racing 12 exhausts it
      * and turns the losers into 500s after a 10s `pool_timeout`, which would
@@ -1005,7 +1088,7 @@ final class IntegrationTest extends TestCase
             ['name' => $name],
             ['Authorization' => 'Bearer ' . $t['api_key'], 'Idempotency-Key' => $key],
             6,
-            static fn (): array => $c->products->create(['name' => $name, 'idempotency_key' => $key]),
+            static fn (): array => $c->products->create(['name' => $name], ['idempotency_key' => $key])->toArray(),
         );
 
         /** @var array{id: string} $viaSdk */
@@ -1014,7 +1097,7 @@ final class IntegrationTest extends TestCase
             if ($status === 409) {
                 // A loser that arrived inside the winner's window. The only
                 // thing worth asserting on the wire is that it is *this* 409
-                // and not some other conflict — a key-reuse conflict here
+                // and not some other conflict, a key-reuse conflict here
                 // would mean the bodies diverged, which is a real bug.
                 /** @var array{error: array{code: string}} $err */
                 $err = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
@@ -1025,8 +1108,7 @@ final class IntegrationTest extends TestCase
                 );
                 $inFlight++;
                 // Retry it as the client would, and require convergence.
-                /** @var array{id: string} $decoded */
-                $decoded = $c->products->create(['name' => $name, 'idempotency_key' => $key]);
+                $decoded = $c->products->create(['name' => $name], ['idempotency_key' => $key])->toArray();
             } else {
                 self::assertSame(200, $status, "racer answered {$status}: {$body}");
                 /** @var array{id: string} $decoded */
@@ -1046,7 +1128,7 @@ final class IntegrationTest extends TestCase
         // And the server really did create only one row.
         $rows = array_filter(
             $c->products->all(['limit' => 100])['data'],
-            static fn (array $row): bool => $row['name'] === $name,
+            static fn (BillKitObject $row): bool => $row['name'] === $name,
         );
         self::assertCount(1, $rows);
     }
@@ -1055,7 +1137,7 @@ final class IntegrationTest extends TestCase
 
     public function testErrorsNotFound(): void
     {
-        $this->expectException(ResourceMissingException::class);
+        $this->expectException(NotFoundException::class);
         $this->client()->products->retrieve('prod_does_not_exist');
     }
 
@@ -1081,12 +1163,12 @@ final class IntegrationTest extends TestCase
     }
 
     /**
-     * Not a contrived body: every request that never reaches a route handler
-     * is serialised by the API's framework-level handler as
-     * `{"type": "api_error", "code": "unhandled"}` with the original 4xx
-     * status. Mapping on `type` made a plain 404 — a typo'd id, an SDK/API
-     * version skew — arrive as `ServerException`, which is the class retry
-     * and alerting policies key on.
+     * An unmatched route answers 404 with
+     * `{"type": "invalid_request_error", "code": "route_not_found"}`.
+     * Mapping on `type` would throw `InvalidRequestException`; mapping on the
+     * status throws `NotFoundException`. Before 1.0 the same miss read
+     * `{"type": "api_error"}`, and mapping on `type` made a plain 404 arrive
+     * as `ServerException`, the class retry and alerting policies key on.
      *
      * Driven through the transport rather than a resource because that is
      * what a version skew looks like: the SDK asking for a route this API
@@ -1095,13 +1177,19 @@ final class IntegrationTest extends TestCase
     public function testErrorsStatusDrivesClass(): void
     {
         try {
-            $this->client()->transport->request('GET', '/v1/no_such_resource');
-            self::fail('expected ResourceMissingException');
-        } catch (ResourceMissingException $e) {
+            // The transport is private in 1.0; a test reaches it the way any
+            // caller cannot, which is the point.
+            $transport = (new \ReflectionProperty(BillKitClient::class, 'transport'))->getValue($this->client());
+            self::assertInstanceOf(\BillKit\Transport::class, $transport);
+            $transport->request('GET', '/v1/no_such_resource');
+            self::fail('expected NotFoundException');
+        } catch (NotFoundException $e) {
+            self::assertNotInstanceOf(InvalidRequestException::class, $e);
             self::assertNotInstanceOf(ServerException::class, $e);
-            // The envelope value is still carried verbatim; it just does not
-            // choose the class.
-            self::assertSame('api_error', $e->errorType);
+            // The envelope values are still carried verbatim; they just do
+            // not choose the class.
+            self::assertSame('invalid_request_error', $e->errorType);
+            self::assertSame('route_not_found', $e->errorCode);
             self::assertSame(404, $e->statusCode);
         }
     }
@@ -1197,14 +1285,21 @@ final class IntegrationTest extends TestCase
         $disputes = $c->disputes->all(['limit' => 100]);
         $match = array_values(array_filter(
             $disputes['data'],
-            static fn (array $d): bool => $d['amount_cents'] === 7700,
+            static fn (BillKitObject $d): bool => $d['amount_cents'] === 7700,
         ));
         self::assertNotEmpty($match, 'a dispute should exist for the charged-back payment');
         self::assertSame('open', $match[0]['status']);
+        // Open means not reversed: the key is there, as an explicit null,
+        // under its 1.0 name.
+        self::assertTrue($match[0]->has('reversed_at'));
+        self::assertNull($match[0]['reversed_at']);
+        self::assertFalse($match[0]->has('reversed'));
         self::assertSame(
             $match[0]['id'],
             $c->disputes->retrieve((string) $match[0]['id'])['id'],
         );
+        $both = $c->disputes->all(['status' => ['open', 'won'], 'limit' => 100]);
+        self::assertContains($match[0]['id'], array_column($both['data'], 'id'));
     }
 
     public function testMoneyCreditNoteForRefund(): void
@@ -1273,7 +1368,7 @@ final class IntegrationTest extends TestCase
         self::assertNotNull($invoice);
         self::assertSame('paid', $invoice['status']);
 
-        // Not a limitation — the contract. Voiding claims the sale was never
+        // Not a limitation, the contract. Voiding claims the sale was never
         // owed, which is false once the money moved; the reversal there is a
         // credit note.
         try {
@@ -1296,8 +1391,7 @@ final class IntegrationTest extends TestCase
         $record = $c->subscriptions->createUsageRecord((string) $sub['id'], [
             'quantity' => 42,
             'metadata' => ['source' => 'php-it'],
-            'idempotency_key' => $key,
-        ]);
+        ], ['idempotency_key' => $key]);
         self::assertSame('usage_record', $record['object']);
         self::assertSame($sub['id'], $record['subscription_id']);
         self::assertSame(42, $record['quantity']);
@@ -1309,8 +1403,7 @@ final class IntegrationTest extends TestCase
         $replay = $c->subscriptions->createUsageRecord((string) $sub['id'], [
             'quantity' => 42,
             'metadata' => ['source' => 'php-it'],
-            'idempotency_key' => $key,
-        ]);
+        ], ['idempotency_key' => $key]);
         self::assertSame($record['id'], $replay['id']);
     }
 
@@ -1349,8 +1442,12 @@ final class IntegrationTest extends TestCase
         $price = $this->makePlan($c, 2500)['price'];
         $sub = $this->activeSubscription($c, (string) $price['id']);
 
-        $this->expectException(InvalidRequestException::class);
-        $c->subscriptions->createUsageRecord((string) $sub['id'], ['quantity' => 1]);
+        try {
+            $c->subscriptions->createUsageRecord((string) $sub['id'], ['quantity' => 1]);
+            self::fail('expected ConflictException');
+        } catch (ConflictException $e) {
+            self::assertSame('state_conflict', $e->errorCode);
+        }
     }
 
     public function testUsageDedupeIdentifier(): void
@@ -1363,15 +1460,13 @@ final class IntegrationTest extends TestCase
         $first = $c->subscriptions->createUsageRecord((string) $sub['id'], [
             'quantity' => 9,
             'identifier' => $identifier,
-            'idempotency_key' => IntegrationHarness::idemKey(),
-        ]);
+        ], ['idempotency_key' => IntegrationHarness::idemKey()]);
         // A DIFFERENT idempotency key, so the transport-level replay guard
         // cannot be what dedupes this. Only the natural key can.
         $second = $c->subscriptions->createUsageRecord((string) $sub['id'], [
             'quantity' => 9,
             'identifier' => $identifier,
-            'idempotency_key' => IntegrationHarness::idemKey(),
-        ]);
+        ], ['idempotency_key' => IntegrationHarness::idemKey()]);
         self::assertSame($first['id'], $second['id']);
 
         $pending = $c->subscriptions->listUsageRecords((string) $sub['id'], [
@@ -1400,6 +1495,88 @@ final class IntegrationTest extends TestCase
         self::assertSame(3850, $summary['net_cents']);
         self::assertSame($summary['gross_cents'], $summary['net_cents'] + $summary['tax_cents']);
         self::assertTrue($summary['will_charge']);
+    }
+
+    // ── safety ───────────────────────────────────────────────────────
+
+    public function testSafetyPurgeRequiresConfirmation(): void
+    {
+        $c = $this->client();
+        $customer = $c->customers->create([
+            'email' => 'purge-' . IntegrationHarness::idemKey() . '@sdk-it.example.com',
+            'name' => 'To Be Forgotten',
+        ]);
+
+        // Without the confirmation nothing is sent: the customer is intact.
+        try {
+            $c->customers->purge($customer->id);
+            self::fail('an unconfirmed purge must throw before any request');
+        } catch (\InvalidArgumentException) {
+        }
+        self::assertSame($customer->email, $c->customers->retrieve($customer->id)->email);
+
+        $purged = $c->customers->purge($customer->id, ['confirmed' => true]);
+        // The marker, not the customer: its placeholder email would read as
+        // live data.
+        self::assertSame(
+            ['id' => $customer->id, 'object' => 'customer', 'deleted' => true, 'purged' => true],
+            $purged->toArray(),
+        );
+
+        // A purged customer has also left the API.
+        $this->expectException(NotFoundException::class);
+        $c->customers->retrieve($customer->id);
+    }
+
+    // ── events ───────────────────────────────────────────────────────
+
+    public function testEventsPreviousAttributesNullable(): void
+    {
+        $c = $this->client();
+
+        // A creation has no prior state: the key is present and null.
+        $customer = $c->customers->create(['email' => 'evt-' . IntegrationHarness::idemKey() . '@sdk-it.example.com']);
+        $created = null;
+        foreach ($c->events->autoPagingIterator(['type' => 'customer.created', 'limit' => 100]) as $event) {
+            if ($event->data['id'] === $customer->id) {
+                $created = $c->events->retrieve($event->id);
+
+                break;
+            }
+        }
+        self::assertInstanceOf(CustomerCreatedEvent::class, $created);
+        self::assertTrue($created->has('previous_attributes'));
+        self::assertNull($created->previous_attributes);
+
+        // A pause reports what it moved, with the value before it.
+        $price = $this->makePlan($c, 1500)['price'];
+        $sub = $this->activeSubscription($c, $price->id);
+        $c->subscriptions->pause($sub->id);
+        $updated = null;
+        foreach ($c->events->autoPagingIterator(['type' => 'subscription.updated', 'limit' => 100]) as $event) {
+            if ($event->data['id'] === $sub->id && isset($event->previous_attributes['renewal_state'])) {
+                $updated = $c->events->retrieve($event->id);
+
+                break;
+            }
+        }
+        self::assertInstanceOf(SubscriptionUpdatedEvent::class, $updated);
+        self::assertSame('auto_renew', $updated->previous_attributes['renewal_state'] ?? null);
+        self::assertSame('paused', $updated->data->renewal_state);
+
+        // `type` takes a list, sent comma-joined, and returns exactly those.
+        $wanted = ['customer.created', 'subscription.updated'];
+        $seen = [];
+        foreach ($c->events->autoPagingIterator(['type' => $wanted, 'limit' => 100]) as $event) {
+            $seen[(string) $event->type] = true;
+        }
+        $seenTypes = array_keys($seen);
+        sort($seenTypes);
+        self::assertSame($wanted, $seenTypes);
+        $page = $c->events->all(['type' => $wanted, 'limit' => 100]);
+        foreach ($page['data'] as $event) {
+            self::assertContains($event['type'], $wanted);
+        }
     }
 
     // ── webhooks ─────────────────────────────────────────────────────
@@ -1440,10 +1617,23 @@ final class IntegrationTest extends TestCase
         Webhooks::verifySignature($body, $this->sign($body, $stale), self::SECRET);
     }
 
+    public function testWebhooksEventTypeConstants(): void
+    {
+        $catalogue = $this->client()->webhookEndpoints->listEventTypes();
+        $live = array_values(array_filter(
+            $catalogue['data'],
+            static fn ($t): bool => $t !== $catalogue['wildcard'],
+        ));
+        $sdk = EventType::all();
+        sort($live);
+        sort($sdk);
+        self::assertSame($live, $sdk);
+    }
+
     // ── methods ──────────────────────────────────────────────────────
     //
     // The two request surfaces take different method sets. This SDK names
-    // no method anywhere — it forwards whatever array it is handed — so
+    // no method anywhere, it forwards whatever array it is handed, so
     // these scenarios are the only thing holding php to the same wire
     // contract node and python spell out in their types.
 
@@ -1454,13 +1644,13 @@ final class IntegrationTest extends TestCase
     private const RECURRING_METHODS = ['creditcard', 'directdebit', 'ideal', 'eps', 'applepay', 'paypal'];
 
     /**
-     * The subset that can actually be a checkout's `method`, i.e. that Mollie
+     * The subset that can actually be a checkout's `payment_method`, i.e. that Mollie
      * will mint a mandate from at `sequenceType=first`.
      *
      * `directdebit` is the one member of RECURRING_METHODS missing here, and
      * the distinction is the whole point of the scenario: SEPA belongs in a
      * price's allowlist because it is what the renewals settle on, but it can
-     * never be the FIRST charge — the mandate has to be minted by a card,
+     * never be the FIRST charge, the mandate has to be minted by a card,
      * iDEAL, EPS, Apple Pay or PayPal payment before anything can be collected
      * over it.
      */
@@ -1477,7 +1667,7 @@ final class IntegrationTest extends TestCase
     /**
      * Narrower than the one-shot set on purpose: a checkout has to mint the
      * mandate the renewal will charge. It is also narrower than the price
-     * allowlist, which is the part that surprises people — `directdebit` is a
+     * allowlist, which is the part that surprises people, `directdebit` is a
      * perfectly good thing for a price to offer and can never be the payment
      * that starts one.
      */
@@ -1499,10 +1689,10 @@ final class IntegrationTest extends TestCase
         // A customer each: an in-flight initial_checkout is guarded per
         // customer, so reusing one would fail the second method for a reason
         // that has nothing to do with its name.
-        $startCheckout = fn (string $method): array => $c->checkoutSessions->create([
+        $startCheckout = fn (string $method): CheckoutSession => $c->checkoutSessions->create([
             'customer_id' => $this->methodBuyer($c)['id'],
             'price_id' => $price['id'],
-            'method' => $method,
+            'payment_method' => $method,
             'success_url' => 'https://merchant.example.com/ok',
             'cancel_url' => 'https://merchant.example.com/cancel',
         ]);
@@ -1513,8 +1703,8 @@ final class IntegrationTest extends TestCase
 
         // Two different refusals, and they come from two different layers.
         //
-        // `directdebit` passes the request literal — it IS a RecurringMethod,
-        // and the price above offers it — and is refused by the service,
+        // `directdebit` passes the request literal, it IS a RecurringMethod,
+        // and the price above offers it, and is refused by the service,
         // because SEPA is what renewals settle on rather than something a
         // buyer can pay with first.
         //
@@ -1548,6 +1738,7 @@ final class IntegrationTest extends TestCase
         foreach (self::ONE_SHOT_METHODS as $method) {
             $charge = $this->oneShot($c, $method);
             self::assertNotEmpty($charge['id'], "{$method} should take a one-off charge");
+            self::assertSame($method, $charge->payment_method);
         }
 
         foreach (['directdebit', 'giropay'] as $method) {
@@ -1595,7 +1786,11 @@ final class IntegrationTest extends TestCase
         ]);
         self::assertSame('embedded', $created['ui_mode']);
         self::assertNull($created['redirect_url']);
-        self::assertNull($created['method']);
+        self::assertNull($created['payment_method']);
+        self::assertFalse($created->has('method'));
+        // Always an object, `{}` when none was set, never null.
+        self::assertSame([], $created->metadata);
+        self::assertTrue($created->has('metadata'));
         self::assertIsString($created['client_secret']);
         self::assertStringStartsWith($created['id'] . '_secret_', $created['client_secret']);
 
@@ -1609,11 +1804,11 @@ final class IntegrationTest extends TestCase
         $t = IntegrationHarness::provisionTenant('one-shot-list');
         $c = $this->client($t['api_key']);
         $buyer = $this->methodBuyer($c);
-        $make = fn (): array => $c->oneShotPayments->create([
+        $make = fn (): OneShotPayment => $c->oneShotPayments->create([
             'customer_id' => $buyer['id'],
             'amount_cents' => 2500,
             'currency' => 'EUR',
-            'method' => 'creditcard',
+            'payment_method' => 'creditcard',
             'success_url' => 'https://merchant.example.com/ok',
         ]);
         $first = $make();
@@ -1631,12 +1826,22 @@ final class IntegrationTest extends TestCase
             self::assertSame($status, $row['status']);
         }
 
-        $this->expectException(InvalidRequestException::class);
-        $c->oneShotPayments->all(['status' => 'settled']);
+        try {
+            $c->oneShotPayments->all(['status' => 'settled']);
+            self::fail('an unknown one-shot status must be refused');
+        } catch (InvalidRequestException) {
+        }
+
+        // Refunding a charge nobody paid is a state refusal, not a bad request.
+        try {
+            $c->refunds->create(['one_shot_payment_id' => $first['id']]);
+            self::fail('refunding an unpaid one-shot must be refused');
+        } catch (ConflictException $e) {
+            self::assertSame('state_conflict', $e->errorCode);
+        }
     }
 
-    /** @return array<string, mixed> */
-    private function methodBuyer(BillKitClient $c): array
+    private function methodBuyer(BillKitClient $c): Customer
     {
         return $c->customers->create([
             'email' => 'method-' . IntegrationHarness::idemKey() . '@sdk-it.example.com',
@@ -1644,14 +1849,13 @@ final class IntegrationTest extends TestCase
         ]);
     }
 
-    /** @return array<string, mixed> */
-    private function oneShot(BillKitClient $c, string $method): array
+    private function oneShot(BillKitClient $c, string $method): OneShotPayment
     {
         return $c->oneShotPayments->create([
             'customer_id' => $this->methodBuyer($c)['id'],
             'amount_cents' => 2500,
             'currency' => 'EUR',
-            'method' => $method,
+            'payment_method' => $method,
             'success_url' => 'https://merchant.example.com/ok',
         ]);
     }

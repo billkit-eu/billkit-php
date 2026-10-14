@@ -5,95 +5,86 @@ declare(strict_types=1);
 namespace BillKit\Resource;
 
 use BillKit\Collection;
+use BillKit\Model\Payment;
+use BillKit\Model\ProviderPayload;
 
 /**
- * Read-only access to the payment ledger.
+ * Subscription payments.
  *
- * Payments are written by the billing pipeline (checkout, renewal,
- * reauthorize). Refunds and disputes are separate flows.
+ * @internal constructed by {@see \BillKit\BillKitClient}; use `$client->payments`.
  */
 final class Payments extends BaseResource
 {
     /**
-     * Fetch a single payment by id.
+     * One payment.
      *
-     * ``['expand' => ['customer', 'subscription']]`` attaches the buyer and
-     * the subscription this charge belongs to.
+     * `['expand' => ['customer', 'subscription']]` attaches the buyer and the
+     * subscription. `['expand' => ['refund_eligibility']]` attaches whether a
+     * refund of the remaining balance would succeed now, applying the refund
+     * window and the price's refund policy; when it would not, `reason` says
+     * why. Treat a reason you do not recognise as "not refundable". That
+     * relation is retrieve-only.
      *
-     * ``['expand' => ['refund_eligibility']]`` attaches whether a refund of
-     * the remaining balance would succeed now, applying the refund window
-     * and the price's refund policy, which ``amount_refundable_cents`` does
-     * not: ``['object' => 'refund_eligibility', 'eligible', 'amount_cents',
-     * 'currency', 'days_remaining', 'window_ends_at', 'reason']``. When not
-     * eligible, ``reason`` is ``not_paid``, ``unrefundable_type``,
-     * ``window_expired``, ``fully_refunded``, ``disputed`` (an open
-     * chargeback took the balance), ``operation_pending`` (another refund
-     * is still being confirmed) or ``plan_change_pending`` (a plan change is
-     * settling: the full balance cannot be refunded yet, a partial refund
-     * still can). Treat any other reason as "not refundable". This relation is retrieve-only: {@see self::all()}
-     * refuses it with an {@see \BillKit\Exception\InvalidRequestException}.
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @param array<string, scalar|list<string>|null> $params ``expand`` only
-     *
-     * @return array<string, mixed>
+     * @return Payment
      */
-    public function retrieve(string $id, array $params = []): array
+    public function retrieve(string $id, array $params = [], array $opts = []): Payment
     {
-        return $this->get('/v1/payments/' . self::p($id), $params);
+        return $this->getObject('/v1/payments/' . self::p($id), $params, $opts, Payment::class);
     }
 
     /**
-     * Fetch the provider's own record of this charge, live.
+     * The provider's own record of this charge, read live.
      *
-     * Reads Mollie at request time rather than a stored copy, so it carries
-     * what BillKit deliberately does not keep: the card BIN, the iDEAL
-     * bank, the provider's own status string. Reading live means it can
-     * fail, and a provider outage or a charge old enough to have aged out
-     * answers ``200`` with ``available: false`` and a short reason rather
-     * than an error, so render the rest of the page regardless.
+     * It carries what BillKit deliberately does not keep (the card BIN, the
+     * iDEAL bank, the provider's status string). A provider outage or a charge
+     * old enough to have aged out answers with `available: false` and a short
+     * reason rather than an error.
      *
-     * @return array<string, mixed>
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return ProviderPayload
      */
-    public function retrieveProvider(string $id): array
+    public function retrieveProvider(string $id, array $params = [], array $opts = []): ProviderPayload
     {
-        return $this->get('/v1/payments/' . self::p($id) . '/provider');
+        return $this->getObject('/v1/payments/' . self::p($id) . '/provider', $params, $opts, ProviderPayload::class);
     }
 
     /**
-     * List one page of payments. Use {@see self::autoPagingIterator()} to
-     * walk every page.
+     * One page of payments.
      *
-     * ``customer_id`` narrows to one buyer's charges. Failed and pending
-     * attempts are listed alongside settled ones, so read ``status`` before
-     * treating a row as revenue; mandate verifications are never listed, so
-     * every row is a real purchase attempt. One-off charges are not here.
+     * `customer_id` narrows to one buyer. Failed and pending attempts are listed
+     * alongside settled ones, so read `status` before treating a row as revenue.
+     * One-off charges are in {@see OneShotPayments::all()}. `['expand' =>
+     * ['customer', 'subscription']]` is accepted.
      *
-     * ``['expand' => ['customer', 'subscription']]`` is accepted too, and is
-     * resolved for the whole page in one query rather than per row.
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @param array<string, scalar|list<string>|null> $params
-     *
-     * @return array<string, mixed>
+     * @return Collection<Payment>
      */
-    public function all(array $params = []): array
+    public function all(array $params = [], array $opts = []): Collection
     {
-        return $this->get('/v1/payments', $params);
+        return $this->getList('/v1/payments', $params, $opts, Payment::class);
     }
 
     /**
-     * Yield every payment across all pages, optionally narrowed to one
-     * customer. The filter is carried onto every page request, so a
-     * filtered walk narrows server-side instead of paging the whole
-     * ledger to find the tail of the match.
+     * Every item across all pages.
      *
-     * @return \Generator<int, mixed>
+     * Takes the same `$params` as {@see self::all()}; the filters are carried
+     * onto every page request, so a filtered walk narrows server-side. `limit`
+     * sets the page size.
+     *
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return \Generator<int, Payment>
      */
-    public function autoPagingIterator(?int $pageSize = null, ?string $customerId = null): \Generator
+    public function autoPagingIterator(array $params = [], array $opts = []): \Generator
     {
-        yield from Collection::autoPagingIterator(
-            fn (array $p): array => $this->get('/v1/payments', $p),
-            $pageSize,
-            ['customer_id' => $customerId],
-        );
+        yield from $this->all($params, $opts)->autoPagingIterator();
     }
 }

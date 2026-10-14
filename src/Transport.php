@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace BillKit;
 
 use BillKit\Exception\ApiConnectionException;
-use BillKit\Exception\BillKitException;
+use BillKit\Exception\ApiException;
+use BillKit\Exception\ApiTimeoutException;
+use BillKit\Model\RequestMaps;
 use Psr\Http\Client\ClientExceptionInterface;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
@@ -18,8 +20,8 @@ use Psr\Log\NullLogger;
  *
  * By default it uses a bundled ``curl`` client so ``composer require
  * billkit-eu/billkit-php`` pulls in **no** hard runtime dependencies beyond
- * ext-curl/ext-json, the same zero-dependency stance the Stripe PHP
- * SDK takes to avoid version conflicts in host apps.
+ * ext-json (and ext-curl for this default client), the same zero-dependency
+ * stance the Stripe PHP SDK takes to avoid version conflicts in host apps.
  *
  * For full control (custom TLS, proxies, connection pooling, test
  * doubles) inject any PSR-18 client plus PSR-17 factories; the transport
@@ -53,14 +55,26 @@ use Psr\Log\NullLogger;
  * either: it is thrown as a typed {@see BillKitException} carrying the
  * status, request id and retry-after, and logging it here as well would
  * hand the caller a duplicate they cannot suppress.
+ *
+ * @internal Not part of the public API: reach the API through
+ *           {@see BillKitClient}'s resources. Its signatures change without
+ *           a major version.
  */
 final class Transport
 {
     public const DEFAULT_BASE_URL = 'https://api.billkit.eu';
-    public const DEFAULT_TIMEOUT_MS = 30_000;
+    /** Seconds, like Guzzle and stripe-php. */
+    public const DEFAULT_TIMEOUT = 30.0;
 
-    /** Cap on the connection phase; never exceeds the total timeout. */
-    private const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
+    /**
+     * The longest timeout accepted, in seconds. 0.x took milliseconds, so a
+     * 0.x call such as `new BillKitClient($key, null, 30000)` still type-checks
+     * and would wait more than eight hours; anything above this is refused.
+     */
+    public const MAX_TIMEOUT = 600.0;
+
+    /** Cap on the connection phase, in seconds; never exceeds the total timeout. */
+    private const DEFAULT_CONNECT_TIMEOUT = 10.0;
 
     /**
      * How many storage redirects a document route may take. Both transports
@@ -78,16 +92,17 @@ final class Transport
     public function __construct(
         private readonly string $apiKey,
         ?string $baseUrl = null,
-        private readonly int $timeoutMs = self::DEFAULT_TIMEOUT_MS,
+        private readonly float $timeout = self::DEFAULT_TIMEOUT,
         ?RetryPolicy $retryPolicy = null,
         private readonly ?ClientInterface $httpClient = null,
         private readonly ?RequestFactoryInterface $requestFactory = null,
         private readonly ?StreamFactoryInterface $streamFactory = null,
         ?LoggerInterface $logger = null,
     ) {
-        if ($apiKey === '') {
+        if (trim($apiKey) === '') {
             throw new \InvalidArgumentException('BillKit: an API key is required.');
         }
+        self::assertTimeout($timeout, 'the timeout');
         $this->baseUrl = rtrim($baseUrl ?? self::DEFAULT_BASE_URL, '/');
         $this->retryPolicy = $retryPolicy ?? new RetryPolicy();
         $this->logger = $logger ?? new NullLogger();
@@ -95,22 +110,102 @@ final class Transport
         if ($httpClient !== null && ($requestFactory === null || $streamFactory === null)) {
             throw new \InvalidArgumentException(
                 'BillKit: injecting a PSR-18 client also requires PSR-17 request + stream factories '
-                . '(e.g. nyholm/psr7 or php-http/discovery).',
+                . '(e.g. nyholm/psr7).',
             );
         }
-        if ($httpClient === null && !\extension_loaded('curl')) {
+        self::assertSendable($httpClient !== null, \extension_loaded('curl'));
+    }
+
+    /**
+     * Refuse to build a transport that could never send a request.
+     * `ext-curl` is only suggested by composer.json, because a caller who
+     * injects a PSR-18 client does not need it; without either, every call
+     * would fail at the first request with an undefined-function error, so
+     * the constructor says what to install instead.
+     *
+     * @throws \RuntimeException
+     */
+    private static function assertSendable(bool $hasClient, bool $curlLoaded): void
+    {
+        if (!$hasClient && !$curlLoaded) {
             throw new \RuntimeException(
-                'BillKit: the curl extension is required unless you inject a PSR-18 client.',
+                'BillKit: no way to send a request. Install the PHP curl extension (ext-curl) for the '
+                . 'bundled transport, or pass a PSR-18 $httpClient with PSR-17 $requestFactory and '
+                . '$streamFactory (for example symfony/http-client with nyholm/psr7).',
             );
+        }
+    }
+
+    /**
+     * The JSON for a request body.
+     *
+     * An empty array must go out as ``{}`` wherever the API expects an
+     * object, not ``[]``. PHP cannot tell an empty map from an empty list,
+     * and ``json_encode([])`` picks the list, which the API rejects with
+     * "Input should be a valid dictionary". Two places hit it: the body
+     * itself, because no BillKit request body is ever a JSON array (a route
+     * whose body is entirely optional, ``POST /v1/invoices/{id}/void`` with
+     * no ``reason``), and a map field inside it (``['metadata' => []]``,
+     * ``theme``, ``capabilities``), whose paths {@see RequestMaps} generates
+     * from the OpenAPI document. ``JSON_FORCE_OBJECT`` is not the answer: it
+     * would also rewrite the lists that are genuinely lists (``tiers``,
+     * ``enabled_events``, ``payment_methods``).
+     *
+     * @param array<array-key, mixed> $body
+     *
+     * @throws \InvalidArgumentException when the body has no JSON form (a string
+     *                                   that is not UTF-8, a resource, INF/NAN)
+     */
+    private static function encodeBody(string $method, string $path, array $body): string
+    {
+        $value = $body === [] ? new \stdClass() : RequestMaps::apply($method, $path, $body);
+        try {
+            return json_encode($value, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        } catch (\JsonException $e) {
+            // Raised before anything is sent, and caused by the caller's
+            // value, so it is an argument error like every other one the SDK
+            // refuses locally. The value itself is not quoted: it may be a
+            // customer's name or address.
+            throw new \InvalidArgumentException(
+                sprintf(
+                    'BillKit: the request body for %s %s cannot be encoded as JSON (%s). '
+                    . 'Strings must be valid UTF-8, and numbers finite.',
+                    $method,
+                    $path,
+                    $e->getMessage(),
+                ),
+                0,
+                $e,
+            );
+        }
+    }
+
+    /**
+     * Refuse a timeout that is not a number of seconds in (0, MAX_TIMEOUT].
+     *
+     * @throws \InvalidArgumentException
+     */
+    public static function assertTimeout(float $timeout, string $what): void
+    {
+        if (!($timeout > 0)) {
+            throw new \InvalidArgumentException("BillKit: {$what} is a number of seconds greater than 0.");
+        }
+        if ($timeout > self::MAX_TIMEOUT) {
+            throw new \InvalidArgumentException(sprintf(
+                'BillKit: %s of %s seconds is over the %d-second maximum. Timeouts are seconds since 1.0 '
+                . '(0.x took milliseconds): pass 30.0 for 30 seconds, not 30000.',
+                $what,
+                rtrim(rtrim(number_format($timeout, 3, '.', ''), '0'), '.'),
+                (int) self::MAX_TIMEOUT,
+            ));
         }
     }
 
     /**
      * Perform one API call, retrying transient failures per the policy.
      *
-     * @param array<string, scalar|list<string>|null> $query
-     * @param array<string, mixed>|null               $body
-     * @param array<string, string>                   $extraHeaders
+     * @param array<string, mixed>      $query
+     * @param array<string, mixed>|null $body
      *
      * @return array<string, mixed> Decoded JSON body (``[]`` when empty)
      */
@@ -119,68 +214,60 @@ final class Transport
         string $path,
         array $query = [],
         ?array $body = null,
-        ?string $idempotencyKey = null,
-        array $extraHeaders = [],
+        ?RequestOptions $opts = null,
     ): array {
-        $raw = $this->perform($method, $path, $query, $body, $idempotencyKey, $extraHeaders);
+        [$status, $headers, $raw] = $this->perform($method, $path, $query, $body, $opts ?? RequestOptions::parse([]));
 
-        return $this->decodeSuccess($raw);
+        return $this->decodeSuccess($status, $headers, $raw);
     }
 
     /**
-     * The retry loop. Returns the first 2xx response body, or throws.
+     * The retry loop. Returns the first 2xx response, or throws.
      *
-     * @param array<string, scalar|list<string>|null> $query
-     * @param array<string, mixed>|null               $body
-     * @param array<string, string>                   $extraHeaders
+     * @param array<string, mixed>      $query
+     * @param array<string, mixed>|null $body
+     *
+     * @return array{0: int, 1: array<string, string>, 2: string} status, lowercased headers, body
      */
     private function perform(
         string $method,
         string $path,
         array $query,
         ?array $body,
-        ?string $idempotencyKey,
-        array $extraHeaders,
+        RequestOptions $opts,
         bool $followRedirects = false,
-    ): string {
+    ): array {
         $url = $this->buildUrl($path, $query);
         // Query-free; see logSafeUrl(). Never log $url itself.
         $loggedUrl = $this->logSafeUrl($path);
-        $idem = $this->autoIdempotencyKey($method, $idempotencyKey);
-        $headers = $this->buildHeaders($body !== null, $idem, $extraHeaders);
-        // An EMPTY body array must go out as ``{}``, not ``[]``. PHP cannot
-        // tell an empty map from an empty list, and ``json_encode([])``
-        // picks the list — which the API rejects with "Input should be a
-        // valid dictionary", because no BillKit request body is ever a JSON
-        // array. Reached by any route whose body is entirely optional
-        // (``POST /v1/invoices/{id}/void`` with no ``reason``). Cast only
-        // the EMPTY case: ``JSON_FORCE_OBJECT`` would also rewrite the
-        // nested lists that are genuinely lists (``tiers``,
-        // ``enabled_events``, ``payment_methods``).
-        $encoded = $body !== null
-            ? json_encode(
-                $body === [] ? new \stdClass() : $body,
-                JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE,
-            )
-            : null;
+        // Generated ONCE, here, before the retry loop: every attempt of this
+        // logical call carries the same key, which is what lets a retried
+        // POST replay instead of charging twice.
+        $idem = $this->autoIdempotencyKey($method, $opts->idempotencyKey);
+        $headers = $this->buildHeaders($body !== null, $idem, $opts->headers);
+        $timeoutMs = self::toMs($opts->timeout ?? $this->timeout);
+        $policy = $opts->maxRetries === null
+            ? $this->retryPolicy
+            : $this->retryPolicy->withMaxAttempts($opts->maxRetries + 1);
+        $encoded = $body !== null ? self::encodeBody($method, $path, $body) : null;
 
         $lastError = null;
-        for ($attempt = 1; $attempt <= $this->retryPolicy->maxAttempts; $attempt++) {
+        for ($attempt = 1; $attempt <= $policy->maxAttempts; $attempt++) {
             $this->logger->debug('BillKit request', [
                 'method' => $method,
                 'url' => $loggedUrl,
                 'attempt' => $attempt,
-                'max_attempts' => $this->retryPolicy->maxAttempts,
+                'max_attempts' => $policy->maxAttempts,
             ]);
             $startedAt = microtime(true);
             try {
-                [$status, $respHeaders, $respBody] = $this->send($method, $url, $headers, $encoded, $followRedirects);
+                [$status, $respHeaders, $respBody] = $this->send($method, $url, $headers, $encoded, $timeoutMs, $followRedirects);
             } catch (ApiConnectionException $err) {
                 $lastError = $err;
-                if (!$this->retryPolicy->shouldRetry(null, $attempt)) {
+                if (!$policy->shouldRetry(null, $attempt)) {
                     throw $err;
                 }
-                $delay = $this->retryPolicy->backoffForMs($attempt + 1);
+                $delay = $policy->backoffForMs($attempt + 1);
                 $this->logger->warning('BillKit retrying', [
                     'method' => $method,
                     'url' => $loggedUrl,
@@ -202,16 +289,17 @@ final class Transport
             ]);
 
             if ($status >= 200 && $status < 300) {
-                return $respBody;
+                return [$status, $respHeaders, $respBody];
             }
 
             $errorBody = $this->tryDecode($respBody);
             $retryAfterMs = $this->parseRetryAfterMs($respHeaders['retry-after'] ?? null);
-            $error = BillKitException::fromResponse(
+            $error = ApiException::fromResponse(
                 $status,
                 $errorBody,
-                $requestId,
+                $respHeaders,
                 $retryAfterMs === null ? null : $retryAfterMs / 1000,
+                $respBody,
             );
 
             // ``$error->errorCode`` is what separates a transient
@@ -219,13 +307,13 @@ final class Transport
             // 409; see {@see RetryPolicy::IN_PROGRESS_CODE}. The key on the
             // wire is unchanged across attempts, so the retry replays rather
             // than re-charges.
-            if (!$this->retryPolicy->shouldRetry($status, $attempt, $retryAfterMs, $error->errorCode)) {
+            if (!$policy->shouldRetry($status, $attempt, $retryAfterMs, $error->errorCode)) {
                 throw $error;
             }
             $lastError = $error;
             $delay = ($status === 429 && $retryAfterMs !== null)
                 ? $retryAfterMs
-                : $this->retryPolicy->backoffForMs($attempt + 1);
+                : $policy->backoffForMs($attempt + 1);
             $this->logger->warning('BillKit retrying', [
                 'method' => $method,
                 'url' => $loggedUrl,
@@ -255,13 +343,13 @@ final class Transport
      * hop. That applies to a header set through ``CURLOPT_HTTPHEADER`` only
      * from **curl 7.58.0** (CVE-2018-1000007); every PHP 8.1+ runtime is well
      * past it. An injected PSR-18 client owns its own redirect policy, so the
-     * PSR path resolves the hop itself instead — see {@see self::sendPsr()} —
+     * PSR path resolves the hop itself instead (see {@see self::sendPsr()}),
      * and that is the path the test suite exercises, because the curl one is
      * curl's guarantee rather than ours.
      */
-    public function requestBytes(string $method, string $path): string
+    public function requestBytes(string $method, string $path, ?RequestOptions $opts = null): string
     {
-        return $this->perform($method, $path, [], null, null, [], followRedirects: true);
+        return $this->perform($method, $path, [], null, $opts ?? RequestOptions::parse([]), followRedirects: true)[2];
     }
 
     /**
@@ -269,11 +357,17 @@ final class Transport
      *
      * @return array{0: int, 1: array<string, string>, 2: string} status, lowercased headers, body
      */
-    private function send(string $method, string $url, array $headers, ?string $body, bool $followRedirects = false): array
-    {
+    private function send(
+        string $method,
+        string $url,
+        array $headers,
+        ?string $body,
+        int $timeoutMs,
+        bool $followRedirects = false,
+    ): array {
         return $this->httpClient !== null
             ? $this->sendPsr($method, $url, $headers, $body, $followRedirects)
-            : $this->sendCurl($method, $url, $headers, $body, $followRedirects);
+            : $this->sendCurl($method, $url, $headers, $body, $timeoutMs, $followRedirects);
     }
 
     /**
@@ -281,8 +375,14 @@ final class Transport
      *
      * @return array{0: int, 1: array<string, string>, 2: string}
      */
-    private function sendCurl(string $method, string $url, array $headers, ?string $body, bool $followRedirects = false): array
-    {
+    private function sendCurl(
+        string $method,
+        string $url,
+        array $headers,
+        ?string $body,
+        int $timeoutMs,
+        bool $followRedirects = false,
+    ): array {
         // $url is baseUrl . path and $method is an HTTP verb, so both are
         // always non-empty. Assert it so PHPStan narrows to the
         // non-empty-string that curl_setopt's CURLOPT_URL/CURLOPT_CUSTOMREQUEST
@@ -295,8 +395,8 @@ final class Transport
             CURLOPT_URL => $url,
             CURLOPT_CUSTOMREQUEST => $method,
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT_MS => $this->timeoutMs,
-            CURLOPT_CONNECTTIMEOUT_MS => min(self::DEFAULT_CONNECT_TIMEOUT_MS, $this->timeoutMs),
+            CURLOPT_TIMEOUT_MS => $timeoutMs,
+            CURLOPT_CONNECTTIMEOUT_MS => min(self::toMs(self::DEFAULT_CONNECT_TIMEOUT), $timeoutMs),
             // With millisecond timeouts, disable curl's SIGALRM path so a
             // slow DNS lookup still honours the timeout (and stays safe in
             // threaded SAPIs).
@@ -331,9 +431,12 @@ final class Transport
 
         $raw = curl_exec($ch);
         if ($raw === false) {
-            throw new ApiConnectionException(
-                curl_error($ch) !== '' ? self::stripQueryStrings(curl_error($ch)) : 'curl request failed',
-            );
+            $message = curl_error($ch) !== '' ? self::stripQueryStrings(curl_error($ch)) : 'curl request failed';
+            if (curl_errno($ch) === CURLE_OPERATION_TIMEDOUT) {
+                throw new ApiTimeoutException($message);
+            }
+
+            throw new ApiConnectionException($message);
         }
         $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
 
@@ -385,7 +488,7 @@ final class Transport
             // do not, and the ones that do may replay the Authorization header
             // to the storage host. Resolving the hop here makes the behaviour
             // identical under every injected client, and the next request
-            // deliberately carries no credential of ours — the presigned URL
+            // deliberately carries no credential of ours: the presigned URL
             // has its own.
             unset($headers['Authorization']);
             $method = 'GET';
@@ -428,15 +531,20 @@ final class Transport
             // request URI ("cURL error 6: ... for https://api.billkit.eu/
             // v1/customers?email=ada@example.com"), which puts back
             // exactly the query string the rest of this class is careful
-            // to strip — and this message lands in the caller's exception
+            // to strip, and this message lands in the caller's exception
             // handler, their error tracker, and their logs.
             // The original exception rides along as ``getPrevious()``: the
             // message is sanitised and generic ("cURL error 6"), and the
             // client's own exception is the only thing carrying the rest.
-            throw new ApiConnectionException(
-                self::stripQueryStrings($err->getMessage()),
-                previous: $err,
-            );
+            $message = self::stripQueryStrings($err->getMessage());
+            // PSR-18 has no timeout exception of its own, so this reads the
+            // client's message. Guzzle and Symfony both say "timed out", and
+            // curl-backed clients add "cURL error 28".
+            if (preg_match('~timed?[ -]?out|cURL error 28\b~i', $message) === 1) {
+                throw new ApiTimeoutException($message, $err);
+            }
+
+            throw new ApiConnectionException($message, $err);
         }
 
         $respHeaders = [];
@@ -491,7 +599,7 @@ final class Transport
     }
 
     /**
-     * @param array<string, scalar|list<string>|null> $query
+     * @param array<string, mixed> $query
      */
     private function buildUrl(string $path, array $query): string
     {
@@ -508,7 +616,9 @@ final class Transport
      * join a list with commas (the API's ``expand=a,b`` shape), and
      * URL-encode everything else.
      *
-     * @param array<string, scalar|list<string>|null> $query
+     * @param array<string, mixed> $query
+     *
+     * @throws \InvalidArgumentException for a value that has no query-string form
      */
     private function buildQuery(array $query): string
     {
@@ -517,15 +627,41 @@ final class Transport
             if ($value === null || $value === []) {
                 continue;
             }
-            $encoded = match (true) {
-                is_array($value) => implode(',', $value),
-                is_bool($value) => $value ? 'true' : 'false',
-                default => (string) $value,
-            };
+            if (is_array($value)) {
+                $items = [];
+                foreach ($value as $item) {
+                    $items[] = self::queryScalar($key, $item);
+                }
+                $encoded = implode(',', $items);
+            } else {
+                $encoded = self::queryScalar($key, $value);
+            }
             $parts[] = rawurlencode($key) . '=' . rawurlencode($encoded);
         }
 
         return implode('&', $parts);
+    }
+
+    /**
+     * Seconds to curl's milliseconds, rounded up so a sub-millisecond value
+     * never becomes 0, which curl reads as "no timeout".
+     */
+    private static function toMs(float $seconds): int
+    {
+        return max(1, (int) ceil($seconds * 1000));
+    }
+
+    private static function queryScalar(string $key, mixed $value): string
+    {
+        return match (true) {
+            is_bool($value) => $value ? 'true' : 'false',
+            is_string($value), is_int($value), is_float($value) => (string) $value,
+            default => throw new \InvalidArgumentException(sprintf(
+                "BillKit: the '%s' filter must be a string, number, bool or list of those, got %s.",
+                $key,
+                get_debug_type($value),
+            )),
+        };
     }
 
     /**
@@ -573,7 +709,9 @@ final class Transport
         if ($method === 'GET') {
             return null;
         }
-        if ($supplied !== null) {
+        // RequestOptions has already turned a blank key into null; the trim
+        // stays so this method is safe on its own.
+        if ($supplied !== null && trim($supplied) !== '') {
             return $supplied;
         }
 
@@ -616,16 +754,37 @@ final class Transport
     }
 
     /**
+     * Decode a 2xx body. An empty body is `[]`.
+     *
+     * A non-empty body that is not a JSON object or array is thrown as an
+     * {@see ApiException} rather than handed back as `[]`: an empty model
+     * would only move the failure to the caller's first property read. It is
+     * nearly always something answering in the API's place, such as a
+     * captive portal, a misrouted `baseUrl` or a proxy's HTML page; the
+     * exception keeps the status, headers and the body as received.
+     *
+     * @param array<string, string> $headers
+     *
      * @return array<string, mixed>
      */
-    private function decodeSuccess(string $raw): array
+    private function decodeSuccess(int $status, array $headers, string $raw): array
     {
         if ($raw === '') {
             return [];
         }
         $decoded = $this->tryDecode($raw);
+        if ($decoded === null) {
+            throw new ApiException(
+                "BillKit API answered HTTP {$status} with a body that is not JSON. "
+                . 'Check that baseUrl points at the BillKit API and that no proxy is answering in its place.',
+                $status,
+                requestId: $headers['x-request-id'] ?? $headers['request-id'] ?? null,
+                headers: $headers,
+                httpBody: $raw,
+            );
+        }
 
-        return is_array($decoded) ? $decoded : [];
+        return $decoded;
     }
 
     /**

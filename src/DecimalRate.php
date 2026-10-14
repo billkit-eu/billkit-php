@@ -10,7 +10,7 @@ namespace BillKit;
  * ``price.unit_amount_decimal`` and a tier's ``unit_amount_decimal`` are per-unit
  * rates in **minor units** to twelve decimal places: ``'0.02'`` is 0.02 cents,
  * i.e. EUR 0.0002 per unit. The API takes them as **strings** and returns them
- * as strings, because a value like 0.0002 has no exact binary form — the moment
+ * as strings, because a value like 0.0002 has no exact binary form: the moment
  * it becomes a float it is a different number, and JSON has only floats.
  *
  * PHP has no decimal type, which makes this the SDK where the mistake is

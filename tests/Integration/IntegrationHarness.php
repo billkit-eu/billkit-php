@@ -221,7 +221,7 @@ final class IntegrationHarness
      *
      * The pump loop is the part that is easy to get wrong. `curl_multi_exec`
      * is non-blocking, but libcurl only advances a transfer *while it is being
-     * called* — kicking off once and walking away leaves the racers queued
+     * called*, kicking off once and walking away leaves the racers queued
      * rather than sent, and the overlap never happens. So this pumps until
      * every handle is connected and its request written, then hands control
      * back, then drains.

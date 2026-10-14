@@ -126,7 +126,7 @@ final class HappyPathTest extends BillKitTestCase
         $http = (new MockHttpClient())->stage(200, ['id' => 'cus_1']);
         $client = $this->makeClient($http);
 
-        $client->customers->create(['email' => 'a@b.co', 'idempotency_key' => 'my-key']);
+        $client->customers->create(['email' => 'a@b.co'], ['idempotency_key' => 'my-key']);
 
         self::assertSame('my-key', $http->lastRequest()->getHeaderLine('Idempotency-Key'));
         self::assertArrayNotHasKey('idempotency_key', $this->bodyArray($http->lastRequest()));

@@ -4,144 +4,145 @@ declare(strict_types=1);
 
 namespace BillKit\Resource;
 
+use BillKit\Model\TenantBillingProfile;
+use BillKit\Model\TenantCapabilities;
+use BillKit\Model\TenantPortalBranding;
+use BillKit\Model\TenantProviderCredential;
+
 /**
- * Read + mutate tenant-level configuration: Mollie capability cache, the
- * portal-branding row, your own billing profile, the account's data
- * export, and the encrypted provider credential.
+ * Your own account: capabilities, branding, billing profile, export.
+ *
+ * @internal constructed by {@see \BillKit\BillKitClient}; use `$client->tenant`.
  */
 final class Tenant extends BaseResource
 {
     /**
-     * Fetch the cached Mollie capability profile (enabled methods, etc.).
-     *
-     * @return array<string, mixed>
-     */
-    public function capabilities(): array
-    {
-        return $this->get('/v1/tenant/capabilities');
-    }
-
-    /**
-     * Fetch the current portal-branding row.
-     *
-     * @return array<string, mixed>
-     */
-    public function portalBranding(): array
-    {
-        return $this->get('/v1/tenant/portal_branding');
-    }
-
-    /**
-     * Partial-update the portal branding row. Only supplied fields are
-     * sent; an empty string explicitly clears a field.
+     * The payment methods and capabilities the account can use, as last read
+     * from the provider.
      *
      * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @return array<string, mixed>
+     * @return TenantCapabilities
      */
-    public function setPortalBranding(array $params = []): array
+    public function retrieveCapabilities(array $params = [], array $opts = []): TenantCapabilities
     {
-        return $this->post('/v1/tenant/portal_branding', $params);
+        return $this->getObject('/v1/tenant/capabilities', $params, $opts, TenantCapabilities::class);
     }
 
     /**
-     * Read your own registered country and VAT number.
+     * The customer portal branding.
      *
-     * These are what your customers' VAT is decided against, so check them
-     * before you take your first live payment. ``country_code`` is what you
-     * have stored and can be ``null``; ``effective_country_code`` is what
-     * the next charge will really use. The two differ only when you have
-     * stored nothing, which is exactly the case worth spotting. ``vat_id``
-     * has no effective counterpart, because nothing can stand in for a
-     * registration.
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @return array<string, mixed>
+     * @return TenantPortalBranding
      */
-    public function billingProfile(): array
+    public function retrievePortalBranding(array $params = [], array $opts = []): TenantPortalBranding
     {
-        return $this->get('/v1/tenant/billing_profile');
+        return $this->getObject('/v1/tenant/portal_branding', $params, $opts, TenantPortalBranding::class);
+    }
+
+    /**
+     * Change the customer portal branding. Only the fields you send change:
+     * leave a key out to keep it, pass `null` to clear it. All five
+     * (`business_name`, `support_email`, `logo_url`, `theme`, `capabilities`)
+     * can be cleared. An empty string is not a clear: it is a 400.
+     *
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return TenantPortalBranding
+     */
+    public function setPortalBranding(array $params = [], array $opts = []): TenantPortalBranding
+    {
+        return $this->postObject(
+            '/v1/tenant/portal_branding',
+            $params,
+            $opts,
+            TenantPortalBranding::class,
+            ['business_name', 'support_email', 'logo_url', 'theme', 'capabilities'],
+        );
+    }
+
+    /**
+     * Your registered country and VAT number, which your customers' VAT is
+     * decided against.
+     *
+     * `country_code` is what you stored and can be `null`;
+     * `effective_country_code` is what the next charge will really use. Check
+     * both before your first live payment.
+     *
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return TenantBillingProfile
+     */
+    public function retrieveBillingProfile(array $params = [], array $opts = []): TenantBillingProfile
+    {
+        return $this->getObject('/v1/tenant/billing_profile', $params, $opts, TenantBillingProfile::class);
     }
 
     /**
      * Set the seller identity: jurisdiction, VAT id, invoice address.
      *
-     * ``country_code`` is required on every call: there is nothing to leave
-     * alone about a jurisdiction, and it decides whether a customer's sale
-     * is domestic, cross-border within the EU, or outside it.
-     *
-     * The address fields and ``registration_number`` are partial-update,
-     * and this is one of the places in the SDK where a ``null`` is a
-     * value rather than an omission: leave a key out and the stored value
-     * is untouched, pass it as ``null`` and it is **cleared**. Moving
-     * office is a real event, so an address that could be set once and
-     * never emptied would force you to keep printing something untrue.
-     *
-     * ``vat_id`` can be set once. After that, a different value or ``null``
-     * throws {@see \BillKit\Exception\InvalidRequestException}
-     * (``param`` ``vat_id``, reason ``vat_id_locked``) and the call writes
-     * nothing; re-sending the stored number is accepted. BillKit invoices
-     * you reverse-charged against it, so support changes it.
-     *
-     * Changes take effect on your next charge only. Tax is worked out
-     * before money moves and written onto the payment and its invoice, so
-     * correcting a country here never reprices an issued document.
+     * `country_code` is required on every call. The address fields and
+     * `registration_number` are partial-update and take `null` as a value: leave
+     * a key out to keep it, pass `null` to clear it. `vat_id` can be set once;
+     * after that a different value or `null` is a 400 `vat_id_locked` and
+     * nothing is written. Changes apply from your next charge; issued documents
+     * are never repriced.
      *
      * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @return array<string, mixed>
+     * @return TenantBillingProfile
      */
-    public function setBillingProfile(array $params): array
+    public function setBillingProfile(array $params = [], array $opts = []): TenantBillingProfile
     {
-        $body = ['country_code' => $params['country_code'] ?? null];
-        foreach (
-            ['vat_id', 'address_line1', 'address_line2', 'postal_code', 'city', 'registration_number'] as $field
-        ) {
-            // array_key_exists, not isset: an explicit null is the clear.
-            if (array_key_exists($field, $params)) {
-                $body[$field] = $params[$field];
-            }
-        }
-
-        return $this->postFixed(
+        // Built like every other update: what you pass is sent (so an
+        // unknown key reaches the API and is refused there, not dropped
+        // here), nulls are stripped except on the keys whose null is a
+        // clear.
+        return $this->postObject(
             '/v1/tenant/billing_profile',
-            $body,
-            $this->idempotencyKeyOf($params),
+            $params,
+            $opts,
+            TenantBillingProfile::class,
+            ['vat_id', 'address_line1', 'address_line2', 'postal_code', 'city', 'registration_number'],
         );
     }
 
     /**
-     * Download everything in the account as one JSON document, as raw
-     * bytes.
+     * Everything in the account as one JSON document, as raw bytes: the GDPR
+     * Article 20 portability export, and a backup.
      *
      *     file_put_contents('export.json', $client->tenant->export());
      *
-     * The GDPR Article 20 portability route, and the way to take a backup:
-     * catalogue, customers, subscriptions, every payment with its refunds,
-     * credit notes, disputes, invoices with line items, usage records and
-     * the event log. Each record has the same shape its ``GET`` route
-     * returns, and ``billkit_export_version`` names the shape.
+     * It can be large, so write it to a file. You get the mode of the calling
+     * key. The access is recorded in your audit log.
      *
-     * It is ``application/json`` streamed inline, with no redirect, and it
-     * can be large, so write it to a file rather than holding it in memory.
-     * Test and live data export separately: you get whichever mode the
-     * calling key belongs to. Nothing is changed, but the access is
-     * recorded in your audit log.
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return string
      */
-    public function export(): string
+    public function export(array $params = [], array $opts = []): string
     {
-        return $this->transport->requestBytes('GET', '/v1/tenant/export');
+        return $this->getBytes('/v1/tenant/export', $opts);
     }
 
     /**
-     * Rotate the encrypted provider credential for this tenant. The new
-     * ``api_key`` is encrypted server-side and never logged.
+     * Replace the provider credential. The new key is encrypted server-side and
+     * never logged.
      *
      * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @return array<string, mixed>
+     * @return TenantProviderCredential
      */
-    public function rotateProviderCredential(array $params): array
+    public function rotateProviderCredential(array $params = [], array $opts = []): TenantProviderCredential
     {
-        return $this->post('/v1/tenant/provider_credential', $params);
+        return $this->postObject('/v1/tenant/provider_credential', $params, $opts, TenantProviderCredential::class);
     }
 }

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BillKit\Tests;
 
 use BillKit\Exception\ApiConnectionException;
+use BillKit\RequestOptions;
 use BillKit\RetryPolicy;
 use BillKit\Tests\Support\MockHttpClient;
 use BillKit\Tests\Support\MockNetworkException;
@@ -78,7 +79,7 @@ final class TransportTest extends TestCase
     public function testExtraHeadersArePassedThrough(): void
     {
         $http = (new MockHttpClient())->stage(200, ['ok' => true]);
-        $this->transport($http)->request('GET', '/v1/things', [], null, null, ['X-Trace-Id' => 'abc123']);
+        $this->transport($http)->request('GET', '/v1/things', [], null, RequestOptions::parse(['headers' => ['X-Trace-Id' => 'abc123']]));
 
         self::assertSame('abc123', $http->lastRequest()->getHeaderLine('X-Trace-Id'));
     }
@@ -102,7 +103,7 @@ final class TransportTest extends TestCase
         try {
             $this->transport($http)->request('GET', '/v1/things/1');
             self::fail('expected an exception');
-        } catch (\BillKit\Exception\BillKitException $err) {
+        } catch (\BillKit\Exception\ApiException $err) {
             self::assertSame('req_abc', $err->requestId);
             self::assertIsArray($err->rawBody);
         }
@@ -112,7 +113,7 @@ final class TransportTest extends TestCase
      * An empty body must go out as `{}`, never `[]`.
      *
      * PHP cannot tell an empty map from an empty list, and `json_encode([])`
-     * picks the list — which the API rejects with "Input should be a valid
+     * picks the list, which the API rejects with "Input should be a valid
      * dictionary", because no BillKit request body is ever a JSON array.
      * Reached by any route whose body is entirely optional, which is how it
      * was found: `POST /v1/invoices/{id}/void` with no `reason`.
@@ -151,7 +152,7 @@ final class TransportTest extends TestCase
     {
         // Guzzle and friends interpolate the FULL request URI into their
         // connection-failure messages, which would re-introduce the query
-        // string this SDK is careful never to log — straight into the
+        // string this SDK is careful never to log, straight into the
         // caller's exception handler and error tracker.
         $http = (new MockHttpClient())->stageError(new MockNetworkException(
             'cURL error 6: Could not resolve host for '
@@ -205,8 +206,8 @@ final class TransportTest extends TestCase
 
         try {
             $this->transport($http)->request('GET', '/v1/things/missing');
-            self::fail('expected a BillKitException');
-        } catch (\BillKit\Exception\BillKitException $err) {
+            self::fail('expected an ApiException');
+        } catch (\BillKit\Exception\ApiException $err) {
             self::assertNull($err->getPrevious());
             // ``\Exception::$code`` stays 0; the HTTP status has its own field.
             self::assertSame(0, $err->getCode());
@@ -229,5 +230,53 @@ final class TransportTest extends TestCase
             'expand=customer%2Csubscription&limit=5',
             $http->lastRequest()->getUri()->getQuery(),
         );
+    }
+
+    public function testANonJson2xxIsAnApiExceptionKeepingTheBody(): void
+    {
+        $html = '<html><body>Please log in to the hotel wifi</body></html>';
+        $http = (new MockHttpClient())->stage(200, $html, ['Content-Type' => 'text/html', 'X-Request-Id' => 'req_portal']);
+
+        try {
+            $this->transport($http)->request('GET', '/v1/customers/cus_1');
+            self::fail('a non-JSON 2xx was handed back as an empty object');
+        } catch (\BillKit\Exception\ApiException $err) {
+            // The base class: it is neither a 4xx nor a 5xx.
+            self::assertSame(\BillKit\Exception\ApiException::class, $err::class);
+            self::assertSame(200, $err->statusCode);
+            self::assertSame($html, $err->httpBody);
+            self::assertNull($err->rawBody);
+            self::assertSame('req_portal', $err->requestId);
+            self::assertSame('text/html', $err->headers['content-type'] ?? null);
+            self::assertStringContainsString('not JSON', $err->getMessage());
+        }
+        self::assertCount(1, $http->requests, 'a non-JSON 2xx is not retried');
+    }
+
+    public function testAJsonScalar2xxIsRefusedAndAnEmpty2xxIsAnEmptyObject(): void
+    {
+        $http = (new MockHttpClient())->stage(200, 'true')->stage(204, '');
+        $transport = $this->transport($http);
+
+        try {
+            $transport->request('GET', '/v1/things');
+            self::fail('a JSON scalar was handed back as an empty object');
+        } catch (\BillKit\Exception\ApiException $err) {
+            self::assertSame('true', $err->httpBody);
+        }
+        self::assertSame([], $transport->request('DELETE', '/v1/things/1'));
+    }
+
+    public function testAnErrorKeepsItsBodyAsReceived(): void
+    {
+        $http = (new MockHttpClient())->stage(502, '<h1>Bad gateway</h1>');
+
+        try {
+            $this->transport($http)->request('GET', '/v1/things');
+            self::fail('expected a ServerException');
+        } catch (\BillKit\Exception\ServerException $err) {
+            self::assertNull($err->rawBody);
+            self::assertSame('<h1>Bad gateway</h1>', $err->httpBody);
+        }
     }
 }

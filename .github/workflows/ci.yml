@@ -16,14 +16,18 @@ jobs:
       fail-fast: false
       matrix:
         php: ['8.1', '8.2', '8.3', '8.4', '8.5']
+        include:
+          # One leg measures coverage; the rest stay fast.
+          - php: '8.4'
+            coverage: pcov
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up PHP ${{ matrix.php }}
-        uses: shivammathur/setup-php@2.37.2
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: ${{ matrix.php }}
           extensions: curl, json, mbstring
-          coverage: none
+          coverage: ${{ matrix.coverage || 'none' }}
           tools: composer:v2
       - name: Install
         run: composer install --no-interaction --no-progress
@@ -32,4 +36,8 @@ jobs:
       - name: Code style
         run: composer cs:check
       - name: Test
+        if: ${{ !matrix.coverage }}
         run: composer test
+      - name: Test with coverage
+        if: ${{ matrix.coverage }}
+        run: vendor/bin/phpunit --coverage-text

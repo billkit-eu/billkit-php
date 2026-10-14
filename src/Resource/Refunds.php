@@ -5,61 +5,80 @@ declare(strict_types=1);
 namespace BillKit\Resource;
 
 use BillKit\Collection;
+use BillKit\Model\Refund;
 
-/** Issue and inspect refunds against payments, subscriptions or one-shot payments. */
+/**
+ * Refunds against subscription and one-shot payments.
+ *
+ * @internal constructed by {@see \BillKit\BillKitClient}; use `$client->refunds`.
+ */
 final class Refunds extends BaseResource
 {
     /**
-     * Issue a refund against a payment, subscription or one-shot payment.
+     * Refund a payment, a subscription's latest payment, or a one-shot payment.
      *
-     * Pass exactly one of ``payment_id``, ``subscription_id`` or
-     * ``one_shot_payment_id`` to select the target; they are mutually
-     * exclusive. Add an optional ``amount_cents`` for a partial refund; omit
-     * it to refund the whole remaining balance. A payment may carry several
-     * partial refunds up to the charged amount.
+     * Pass exactly one of `payment_id`, `subscription_id` or
+     * `one_shot_payment_id`. Add `amount_cents` for a partial refund; omit it to
+     * refund the whole remaining balance. Refunds settle asynchronously: the
+     * returned refund is usually `pending`, and `refund.succeeded` or
+     * `refund.failed` follows. Pass an `idempotency_key` option derived from
+     * your own order id, so a retry of your code cannot refund twice.
+     *
+     * A payment that is not `paid`, or is outside its refund window, is a 409
+     * `ConflictException` with code `state_conflict`, as are the settled facts
+     * `charge_already_refunded`, `charge_disputed` and `refund_duplicate`. An
+     * amount above what is left is a 400.
      *
      * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @return array<string, mixed>
+     * @return Refund
      */
-    public function create(array $params): array
+    public function create(array $params = [], array $opts = []): Refund
     {
-        return $this->post('/v1/refunds', $params);
+        return $this->postObject('/v1/refunds', $params, $opts, Refund::class);
     }
 
     /**
-     * Fetch a single refund by id.
+     * One refund.
      *
-     * @return array<string, mixed>
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return Refund
      */
-    public function retrieve(string $id): array
+    public function retrieve(string $id, array $params = [], array $opts = []): Refund
     {
-        return $this->get('/v1/refunds/' . self::p($id));
+        return $this->getObject('/v1/refunds/' . self::p($id), $params, $opts, Refund::class);
     }
 
     /**
-     * List one page of refunds. Use {@see self::autoPagingIterator()} to
-     * walk every page.
+     * One page of refunds.
      *
-     * @param array<string, scalar|null> $params
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @return array<string, mixed>
+     * @return Collection<Refund>
      */
-    public function all(array $params = []): array
+    public function all(array $params = [], array $opts = []): Collection
     {
-        return $this->get('/v1/refunds', $params);
+        return $this->getList('/v1/refunds', $params, $opts, Refund::class);
     }
 
     /**
-     * Yield every refund across all pages.
+     * Every item across all pages.
      *
-     * @return \Generator<int, mixed>
+     * Takes the same `$params` as {@see self::all()}; the filters are carried
+     * onto every page request, so a filtered walk narrows server-side. `limit`
+     * sets the page size.
+     *
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return \Generator<int, Refund>
      */
-    public function autoPagingIterator(?int $pageSize = null): \Generator
+    public function autoPagingIterator(array $params = [], array $opts = []): \Generator
     {
-        yield from Collection::autoPagingIterator(
-            fn (array $p): array => $this->get('/v1/refunds', $p),
-            $pageSize,
-        );
+        yield from $this->all($params, $opts)->autoPagingIterator();
     }
 }

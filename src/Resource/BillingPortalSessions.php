@@ -4,42 +4,45 @@ declare(strict_types=1);
 
 namespace BillKit\Resource;
 
+use BillKit\Model\BillingPortalSession;
+use BillKit\Model\BillingPortalSessionRevoke;
+
 /**
- * Mint and revoke customer-facing billing-portal sessions.
+ * Customer billing-portal sessions.
  *
- * Each session token is scoped to a single subscription with a sliding
- * 30-minute idle window and a 2-hour hard cap. The raw token is returned
- * **once** on mint, alongside the embeddable URL.
+ * @internal constructed by {@see \BillKit\BillKitClient}; use `$client->billingPortalSessions`.
  */
 final class BillingPortalSessions extends BaseResource
 {
     /**
-     * Mint a portal session for a subscription; the raw token + URL are
+     * Mint a portal session for a subscription. The URL and its token are
      * returned once.
      *
-     * ``['deliver_email' => true]`` also emails the portal link to the
-     * subscription's customer, at the address on their record, as a
-     * tenant-branded message. It defaults to ``false``: without it you
-     * distribute the returned ``url`` yourself.
+     * `subscription_id` and `return_url` are required. `['deliver_email' =>
+     * true]` also emails the portal link to the subscription's customer, at the
+     * address on their record, as a tenant-branded message. It defaults to
+     * `false`: without it you distribute the returned `url` yourself.
      *
-     * @param array<string, mixed> $params Requires ``subscription_id`` and
-     *                                     ``return_url``; optional
-     *                                     ``deliver_email``.
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @return array<string, mixed>
+     * @return BillingPortalSession
      */
-    public function create(array $params): array
+    public function create(array $params = [], array $opts = []): BillingPortalSession
     {
-        return $this->post('/v1/billing_portal/sessions', $params);
+        return $this->postObject('/v1/billing_portal/sessions', $params, $opts, BillingPortalSession::class);
     }
 
     /**
-     * Kill an in-the-wild portal session. Idempotent.
+     * End a portal session that is still in the wild. Idempotent.
      *
-     * @return array<string, mixed>
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return BillingPortalSessionRevoke
      */
-    public function revoke(string $id, ?string $idempotencyKey = null): array
+    public function revoke(string $id, array $params = [], array $opts = []): BillingPortalSessionRevoke
     {
-        return $this->postEmpty('/v1/billing_portal/sessions/' . self::p($id) . '/revoke', $idempotencyKey);
+        return $this->postAction('/v1/billing_portal/sessions/' . self::p($id) . '/revoke', $params, $opts, BillingPortalSessionRevoke::class);
     }
 }

@@ -5,75 +5,58 @@ declare(strict_types=1);
 namespace BillKit\Resource;
 
 use BillKit\Collection;
+use BillKit\Model\AuditLog;
 
 /**
- * Read-only access to the per-tenant audit log.
+ * The audit log: who did what in the account, and when.
  *
- * Supports server-side filters ``action``, ``resource_type``,
- * ``resource_id`` and ``actor_id``, forwarded through
- * ``autoPagingIterator()`` so a walk can scope to a single actor, action
- * or row without client-side filtering.
- *
- * All four match exactly and combine. ``resource_type`` narrows to a kind
- * (``customer``, ``price``); ``resource_id`` narrows to one row, which is
- * the "everything that ever happened to this customer" question an audit
- * log mostly exists for. Pair them or pass ``resource_id`` alone — ids are
- * already unique.
+ * @internal constructed by {@see \BillKit\BillKitClient}; use `$client->auditLogs`.
  */
 final class AuditLogs extends BaseResource
 {
     /**
-     * Fetch a single audit-log entry by id.
+     * One audit-log entry.
      *
-     * @return array<string, mixed>
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return AuditLog
      */
-    public function retrieve(string $id): array
+    public function retrieve(string $id, array $params = [], array $opts = []): AuditLog
     {
-        return $this->get('/v1/audit_logs/' . self::p($id));
+        return $this->getObject('/v1/audit_logs/' . self::p($id), $params, $opts, AuditLog::class);
     }
 
     /**
-     * List one page of audit-log entries. Use {@see self::autoPagingIterator()}
-     * to walk every page.
+     * One page of audit-log entries, newest first.
      *
-     * @param array<string, scalar|null> $params
+     * Filters: `action`, `resource_type`, `resource_id` (everything that ever
+     * happened to one object) and `actor_id`.
      *
-     * @return array<string, mixed>
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return Collection<AuditLog>
      */
-    public function all(array $params = []): array
+    public function all(array $params = [], array $opts = []): Collection
     {
-        return $this->get('/v1/audit_logs', $params);
+        return $this->getList('/v1/audit_logs', $params, $opts, AuditLog::class);
     }
 
     /**
-     * Yield every audit-log entry across all pages, optionally scoped by
-     * ``$action`` / ``$resourceType`` / ``$actorId`` / ``$resourceId``.
+     * Every item across all pages.
      *
-     * ``$resourceId`` is last rather than beside ``$resourceType``, where it
-     * belongs by meaning, because these are positional parameters: inserting
-     * it in the middle would silently re-bind the fourth argument of every
-     * existing four-argument call from an actor id to a resource id, and both
-     * are opaque strings that no type check would catch. Reach for named
-     * arguments (``resourceId: $id``) and the order stops mattering.
+     * Takes the same `$params` as {@see self::all()}; the filters are carried
+     * onto every page request, so a filtered walk narrows server-side. `limit`
+     * sets the page size.
      *
-     * @return \Generator<int, mixed>
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return \Generator<int, AuditLog>
      */
-    public function autoPagingIterator(
-        ?int $pageSize = null,
-        ?string $action = null,
-        ?string $resourceType = null,
-        ?string $actorId = null,
-        ?string $resourceId = null,
-    ): \Generator {
-        yield from Collection::autoPagingIterator(
-            fn (array $p): array => $this->get('/v1/audit_logs', $p),
-            $pageSize,
-            [
-                'action' => $action,
-                'resource_type' => $resourceType,
-                'actor_id' => $actorId,
-                'resource_id' => $resourceId,
-            ],
-        );
+    public function autoPagingIterator(array $params = [], array $opts = []): \Generator
+    {
+        yield from $this->all($params, $opts)->autoPagingIterator();
     }
 }

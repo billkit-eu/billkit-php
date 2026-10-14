@@ -22,6 +22,7 @@ use BillKit\Resource\Refunds;
 use BillKit\Resource\Subscriptions;
 use BillKit\Resource\TaxRates;
 use BillKit\Resource\Tenant;
+use BillKit\Resource\TestClocks;
 use BillKit\Resource\WebhookEndpoints;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
@@ -53,7 +54,7 @@ use Psr\Log\LoggerInterface;
  */
 final class BillKitClient
 {
-    public readonly Transport $transport;
+    private readonly Transport $transport;
 
     public readonly ApiKeys $apiKeys;
     public readonly Customers $customers;
@@ -74,19 +75,30 @@ final class BillKitClient
     public readonly AuditLogs $auditLogs;
     public readonly Payments $payments;
     public readonly BillingPortalSessions $billingPortalSessions;
+    public readonly TestClocks $testClocks;
 
     public function __construct(
         ?string $apiKey = null,
         ?string $baseUrl = null,
-        int $timeoutMs = Transport::DEFAULT_TIMEOUT_MS,
+        float $timeout = Transport::DEFAULT_TIMEOUT,
         ?RetryPolicy $retryPolicy = null,
         ?ClientInterface $httpClient = null,
         ?RequestFactoryInterface $requestFactory = null,
         ?StreamFactoryInterface $streamFactory = null,
         ?LoggerInterface $logger = null,
     ) {
+        // null means "not passed" and reads the environment. An explicit
+        // empty or whitespace-only key is a caller bug (an unset variable
+        // read as ''), refused here, as node and python do, rather than sent
+        // as `Authorization: Bearer ` and answered 401 on every call.
+        if ($apiKey !== null && trim($apiKey) === '') {
+            throw new \InvalidArgumentException(
+                'BillKit: $apiKey is empty. Pass a bk_live_ or bk_test_ key, or pass null to read '
+                . 'BILLKIT_API_KEY from the environment.',
+            );
+        }
         $key = $apiKey ?? self::apiKeyFromEnv();
-        if ($key === null || $key === '') {
+        if ($key === null) {
             throw new \InvalidArgumentException(
                 'BillKit: missing API key. Pass $apiKey or set BILLKIT_API_KEY in the environment.',
             );
@@ -95,7 +107,7 @@ final class BillKitClient
         $this->transport = new Transport(
             $key,
             $baseUrl,
-            $timeoutMs,
+            $timeout,
             $retryPolicy,
             $httpClient,
             $requestFactory,
@@ -122,12 +134,13 @@ final class BillKitClient
         $this->auditLogs = new AuditLogs($this->transport);
         $this->payments = new Payments($this->transport);
         $this->billingPortalSessions = new BillingPortalSessions($this->transport);
+        $this->testClocks = new TestClocks($this->transport);
     }
 
     private static function apiKeyFromEnv(): ?string
     {
         $value = getenv('BILLKIT_API_KEY');
 
-        return $value === false || $value === '' ? null : $value;
+        return $value === false || trim($value) === '' ? null : $value;
     }
 }

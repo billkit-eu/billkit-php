@@ -5,263 +5,250 @@ declare(strict_types=1);
 namespace BillKit\Resource;
 
 use BillKit\Collection;
+use BillKit\Model\PlanChangePreview;
+use BillKit\Model\Reauthorization;
+use BillKit\Model\Subscription;
+use BillKit\Model\UsageRecord;
+use BillKit\Model\UsageSummary;
 
-/** Subscription lifecycle: read, list, and state transitions. */
+/**
+ * Subscriptions: read, list and change them. They are created by checkout, not here.
+ *
+ * @internal constructed by {@see \BillKit\BillKitClient}; use `$client->subscriptions`.
+ */
 final class Subscriptions extends BaseResource
 {
     /**
-     * Fetch a single subscription by id.
+     * One subscription.
      *
-     * ``['expand' => ['customer', 'price', 'refund_eligibility']]``
-     * attaches the buyer summary, the price (with its product name), and
-     * what a cancellation would refund right now. Those three are the only
-     * relations this route expands.
+     * `['expand' => ['customer', 'price', 'refund_eligibility']]` attaches the
+     * buyer summary, the price (with its product name) and what a cancellation
+     * would refund right now.
      *
-     * @param array<string, scalar|list<string>|null> $params ``expand`` only
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @return array<string, mixed>
+     * @return Subscription
      */
-    public function retrieve(string $id, array $params = []): array
+    public function retrieve(string $id, array $params = [], array $opts = []): Subscription
     {
-        return $this->get('/v1/subscriptions/' . self::p($id), $params);
+        return $this->getObject('/v1/subscriptions/' . self::p($id), $params, $opts, Subscription::class);
     }
 
     /**
-     * List one page of subscriptions. Use {@see self::autoPagingIterator()}
-     * to walk every page.
+     * One page of subscriptions.
      *
-     * `$params` takes `customer_id`, plus `status` and `renewal_state`,
-     * which each accept a comma-separated list (`'active,past_due'`). An
-     * unrecognised value is a 400 naming the ones that work rather than
-     * being silently ignored.
+     * Filters: `customer_id`, `status` and `renewal_state`, the last two each a
+     * list (`['active', 'past_due']`), sent comma-joined; a single string is
+     * sent as given. An unrecognised value is a 400 naming the ones that work.
      *
-     * The two filters answer different questions, and confusing them is
-     * the usual mistake against this route. `status` is where the
-     * subscription stands with its payments: `incomplete`, `trialing`,
-     * `active`, `past_due`, `canceled`. `renewal_state` is what happens
-     * at the end of the current period: `auto_renew`, `paused`,
-     * `canceling`, `stopped`. A paused subscription still reads as
-     * `active`, because the customer has paid for the period they are
-     * in, so `['renewal_state' => 'paused']` is how you find paused
-     * ones. `['status' => 'paused']` is not accepted and throws
-     * {@see \BillKit\Exception\InvalidRequestException}.
+     * `status` is where the subscription stands with its payments (`incomplete`,
+     * `trialing`, `active`, `past_due`, `canceled`); `renewal_state` is what
+     * happens at the end of the period (`auto_renew`, `paused`, `canceling`,
+     * `stopped`). A paused subscription is still `active`, because the period is
+     * paid for, so `['renewal_state' => ['paused']]` is how you find paused ones.
      *
-     * ``['expand' => ['customer', 'price', 'refund_eligibility']]`` is
-     * accepted here too, resolved for the whole page in one query.
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @param array<string, scalar|list<string>|null> $params
-     *
-     * @return array<string, mixed>
+     * @return Collection<Subscription>
      */
-    public function all(array $params = []): array
+    public function all(array $params = [], array $opts = []): Collection
     {
-        return $this->get('/v1/subscriptions', $params);
+        return $this->getList('/v1/subscriptions', $params, $opts, Subscription::class);
     }
 
     /**
-     * Yield every subscription across all pages.
+     * Every item across all pages.
      *
-     * `$filters` takes the same keys {@see self::all()} does and is
-     * carried onto every page request, so a filtered walk narrows
-     * server-side. Filtering the pages yourself after the fact means
-     * paging the whole history to find the tail of the match.
+     * Takes the same `$params` as {@see self::all()}; the filters are carried
+     * onto every page request, so a filtered walk narrows server-side. `limit`
+     * sets the page size.
      *
-     * @param array<string, scalar|list<string>|null> $filters
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @return \Generator<int, mixed>
+     * @return \Generator<int, Subscription>
      */
-    public function autoPagingIterator(?int $pageSize = null, array $filters = []): \Generator
+    public function autoPagingIterator(array $params = [], array $opts = []): \Generator
     {
-        yield from Collection::autoPagingIterator(
-            fn (array $p): array => $this->get('/v1/subscriptions', $p),
-            $pageSize,
-            $filters,
-        );
+        yield from $this->all($params, $opts)->autoPagingIterator();
     }
 
     /**
-     * Cancel at period end.
+     * Cancel at the end of the current period.
      *
-     * @return array<string, mixed>
+     * While a renewal payment is still settling, this, {@see self::pause()} and
+     * {@see self::update()} throw a {@see \BillKit\Exception\ConflictException}
+     * (`409 operation_pending`, `reason` `'renewal_processing'`) whose message
+     * names when to retry.
+     *
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return Subscription
      */
-    public function cancel(string $id, ?string $idempotencyKey = null): array
+    public function cancel(string $id, array $params = [], array $opts = []): Subscription
     {
-        return $this->postEmpty('/v1/subscriptions/' . self::p($id) . '/cancel', $idempotencyKey);
+        return $this->postAction('/v1/subscriptions/' . self::p($id) . '/cancel', $params, $opts, Subscription::class);
     }
 
     /**
-     * Pause an active subscription.
+     * Pause renewals. `renewal_state` becomes `paused`; `status` stays `active`
+     * for the period already paid for.
      *
-     * @return array<string, mixed>
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return Subscription
      */
-    public function pause(string $id, ?string $idempotencyKey = null): array
+    public function pause(string $id, array $params = [], array $opts = []): Subscription
     {
-        return $this->postEmpty('/v1/subscriptions/' . self::p($id) . '/pause', $idempotencyKey);
+        return $this->postAction('/v1/subscriptions/' . self::p($id) . '/pause', $params, $opts, Subscription::class);
     }
 
     /**
-     * Resume a paused subscription (paused -> active).
+     * Resume a paused subscription's renewals.
      *
-     * @return array<string, mixed>
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return Subscription
      */
-    public function resume(string $id, ?string $idempotencyKey = null): array
+    public function resume(string $id, array $params = [], array $opts = []): Subscription
     {
-        return $this->postEmpty('/v1/subscriptions/' . self::p($id) . '/resume', $idempotencyKey);
+        return $this->postAction('/v1/subscriptions/' . self::p($id) . '/resume', $params, $opts, Subscription::class);
     }
 
     /**
-     * Reactivate a canceled-but-still-in-period subscription (distinct
-     * from {@see self::resume()}, which is paused -> active). Returns 409
-     * if the period has already elapsed.
+     * Undo a scheduled cancellation while the period is still running (distinct
+     * from {@see self::resume()}, which undoes a pause). A 409 once the period
+     * has ended.
      *
-     * @return array<string, mixed>
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return Subscription
      */
-    public function reactivate(string $id, ?string $idempotencyKey = null): array
+    public function reactivate(string $id, array $params = [], array $opts = []): Subscription
     {
-        return $this->postEmpty('/v1/subscriptions/' . self::p($id) . '/reactivate', $idempotencyKey);
+        return $this->postAction('/v1/subscriptions/' . self::p($id) . '/reactivate', $params, $opts, Subscription::class);
     }
 
     /**
-     * Preview the proration of switching to another price, without applying it.
+     * Price a switch to another price without making it. `target_price_id` is
+     * required.
      *
-     * @return array<string, mixed>
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return PlanChangePreview
      */
-    public function previewUpdate(string $id, string $targetPriceId): array
+    public function previewUpdate(string $id, array $params = [], array $opts = []): PlanChangePreview
     {
-        return $this->postFixed(
-            '/v1/subscriptions/' . self::p($id) . '/preview_update',
-            ['target_price_id' => $targetPriceId],
-        );
+        return $this->postObject('/v1/subscriptions/' . self::p($id) . '/preview_update', $params, $opts, PlanChangePreview::class);
     }
 
     /**
-     * Switch the subscription to another price (apply the change).
+     * Switch the subscription to another price. `target_price_id` is required.
      *
-     * @return array<string, mixed>
+     * The returned subscription is usually still on the old price: the switch
+     * lands when the proration charge settles, and `subscription.updated`
+     * reports it.
+     *
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return Subscription
      */
-    public function update(string $id, string $targetPriceId, ?string $idempotencyKey = null): array
+    public function update(string $id, array $params = [], array $opts = []): Subscription
     {
-        return $this->postFixed(
-            '/v1/subscriptions/' . self::p($id) . '/update',
-            ['target_price_id' => $targetPriceId],
-            $idempotencyKey,
-        );
+        return $this->postObject('/v1/subscriptions/' . self::p($id) . '/update', $params, $opts, Subscription::class);
     }
 
     /**
-     * Start a portal re-auth flow to renew a lapsed payment mandate;
-     * returns the URL to redirect the customer to.
+     * Start a hosted re-authorisation of the payment mandate; send the customer
+     * to the returned `url`. `return_url` is required.
      *
-     * @return array<string, mixed>
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return Reauthorization
      */
-    public function reauthorizePaymentMethod(
-        string $id,
-        string $returnUrl,
-        ?string $idempotencyKey = null,
-    ): array {
-        return $this->postFixed(
-            '/v1/subscriptions/' . self::p($id) . '/reauthorize_payment_method',
-            ['return_url' => $returnUrl],
-            $idempotencyKey,
-        );
+    public function reauthorizePaymentMethod(string $id, array $params = [], array $opts = []): Reauthorization
+    {
+        return $this->postObject('/v1/subscriptions/' . self::p($id) . '/reauthorize_payment_method', $params, $opts, Reauthorization::class);
     }
 
     /**
      * Report consumption against a metered subscription.
      *
-     * Only valid when the subscription's price is `usage_type: "metered"`;
-     * a licensed subscription is rejected with `400 parameter_invalid`.
-     * `$params` carries `quantity` (1..1_000_000, required), optional
-     * `occurred_at` (epoch seconds), `identifier` and `metadata`, plus the
-     * reserved `idempotency_key` entry. Records are immutable once written
-     * — they are the audit trail behind an invoice line — so there is no
-     * update or delete.
+     * `quantity` (1 to 1,000,000) is required; `occurred_at` (Unix seconds),
+     * `identifier` and `metadata` are optional. A licensed subscription is
+     * refused with a 400. Records are immutable.
      *
-     * **Two dedupe mechanisms, covering different failures.**
-     * `idempotency_key` covers a retry of *this HTTP request*: sending the
-     * same key returns the same record instead of double-counting.
-     * `identifier` covers a retry of *your own* call — a job runner
-     * replaying a task, a queue delivering twice, your code re-invoking
-     * after its own timeout — which arrives at the API as a genuinely new
-     * request with a new key, so the transport-level key cannot see it. An
-     * identifier is unique within the subscription, and a second report of
-     * the same one returns the first record unchanged rather than billing
-     * twice. If your reporting pipeline is at-least-once, `identifier` is
-     * the one that matters.
+     * Two dedupe mechanisms cover different failures. The `idempotency_key`
+     * option covers a retry of this HTTP request. `identifier` covers a retry of
+     * your own call (a job runner replaying a task, a queue delivering twice),
+     * which arrives as a new request with a new key: a second report of the same
+     * identifier returns the first record unchanged. If your reporting is
+     * at-least-once, `identifier` is the one that matters.
      *
      * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @return array<string, mixed>
+     * @return UsageRecord
      */
-    public function createUsageRecord(string $id, array $params): array
+    public function createUsageRecord(string $id, array $params = [], array $opts = []): UsageRecord
     {
-        return $this->post('/v1/subscriptions/' . self::p($id) . '/usage_records', $params);
+        return $this->postObject('/v1/subscriptions/' . self::p($id) . '/usage_records', $params, $opts, UsageRecord::class);
     }
 
     /**
-     * List one page of usage records for one subscription.
+     * One page of usage records for one subscription.
      *
-     * Pass `invoice_id => 'pending'` to reconcile what has been reported
-     * but not yet billed, or a concrete invoice id to see what that
-     * invoice charged for. Use
-     * {@see self::autoPagingIteratorUsageRecords()} to walk every page.
+     * `['invoice_id' => 'pending']` lists what has been reported but not yet
+     * billed; a concrete invoice id lists what that invoice charged for.
      *
-     * @param array<string, scalar|null> $params
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * @return array<string, mixed>
+     * @return Collection<UsageRecord>
      */
-    public function listUsageRecords(string $id, array $params = []): array
+    public function listUsageRecords(string $id, array $params = [], array $opts = []): Collection
     {
-        return $this->get('/v1/subscriptions/' . self::p($id) . '/usage_records', $params);
+        return $this->getList('/v1/subscriptions/' . self::p($id) . '/usage_records', $params, $opts, UsageRecord::class);
     }
 
     /**
-     * Price the pending usage, before the period close bills it.
+     * Every usage record for one subscription, across all pages. Takes the same
+     * `$params` as {@see self::listUsageRecords()}, carried onto every page.
      *
-     * {@see self::listUsageRecords()} with `invoice_id => 'pending'` gives
-     * the quantity; this gives the money. `net_cents` / `tax_cents` /
-     * `gross_cents` are computed through the same rate or tier table and
-     * the same VAT resolution the close itself uses, so it is a forecast of
-     * the real invoice rather than an estimate.
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
      *
-     * **Read `will_charge` before promising a customer an amount.** A
-     * period whose total is under `minimum_charge_cents` (EUR 1.00) is not
-     * charged, because the payment provider would refuse it. The usage is
-     * not lost: it stays pending and rolls into the next period, which is
-     * then billed for both.
-     *
-     * `open_invoice_id` names an earlier cycle that is invoiced and still
-     * unsettled; while one is open, this period cannot be charged.
-     *
-     * @return array<string, mixed>
+     * @return \Generator<int, UsageRecord>
      */
-    public function retrieveUsageSummary(string $id): array
+    public function autoPagingIteratorUsageRecords(string $id, array $params = [], array $opts = []): \Generator
     {
-        return $this->get('/v1/subscriptions/' . self::p($id) . '/usage_summary');
+        yield from $this->listUsageRecords($id, $params, $opts)->autoPagingIterator();
     }
 
     /**
-     * Yield every usage record for one subscription across all pages.
+     * The pending usage, priced the way the period close will price it.
      *
-     * `$invoiceId` is the same filter {@see self::listUsageRecords()}
-     * takes and is carried onto every page request: `'pending'` walks
-     * only what has been reported but not yet billed, a concrete
-     * `inv_…` id walks what that invoice charged for. It has to be
-     * threaded through here rather than applied by the caller after the
-     * fact — filtering a multi-page walk client-side means paging the
-     * whole history to find the tail of it.
+     * **Read `will_charge` before promising a customer an amount.** A period
+     * whose total is under `minimum_charge_cents` is not charged, because the
+     * provider would refuse it; the usage rolls into the next period.
+     * `open_invoice_id` names an earlier cycle still unsettled.
      *
-     * @return \Generator<int, mixed>
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $opts   idempotency_key, timeout, max_retries, headers
+     *
+     * @return UsageSummary
      */
-    public function autoPagingIteratorUsageRecords(
-        string $id,
-        ?int $pageSize = null,
-        ?string $invoiceId = null,
-    ): \Generator {
-        yield from Collection::autoPagingIterator(
-            fn (array $p): array => $this->get('/v1/subscriptions/' . self::p($id) . '/usage_records', $p),
-            $pageSize,
-            ['invoice_id' => $invoiceId],
-        );
+    public function retrieveUsageSummary(string $id, array $params = [], array $opts = []): UsageSummary
+    {
+        return $this->getObject('/v1/subscriptions/' . self::p($id) . '/usage_summary', $params, $opts, UsageSummary::class);
     }
 }

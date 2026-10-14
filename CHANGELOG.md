@@ -10,6 +10,395 @@ cadence.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-14
+
+The first stable release, and a deliberate break from 0.x. Composer's `^0.9`
+does not admit 1.0, so nothing upgrades by accident; read the list below before
+you widen your constraint to `^1.0`. From here on, the SDK follows SemVer: a
+breaking change waits for 2.0.
+
+### The 1.0 API contract
+
+The API froze its `/v1` contract for 1.0; these are the parts a caller sees.
+
+- Request validation is a `400` everywhere (`InvalidRequestException`); the API no longer
+  answers `422`, though one would still map to `InvalidRequestException`.
+- New error codes in `ApiException::$errorCode`: `parameter_unknown` (an unknown body
+  field or query parameter, named in `param`), `route_not_found` (404),
+  `method_not_allowed` (405), `state_conflict` (409, replacing a 400
+  `parameter_invalid` for a state refusal such as pausing a canceled
+  subscription; `reason` is unchanged) and `mode_mismatch` (403).
+- An unmatched route is a 404 with type `invalid_request_error` and code
+  `route_not_found`; the status still picks the class, so it is the
+  not-found error.
+- A checkout session's `object` is `checkout.session` (was
+  `checkout_session`).
+- `subscriptions->createUsageRecord()` is answered with `200` (was `201`); the return value is
+  unchanged.
+- API key, audit log and webhook delivery ids are prefixed: `ak_`, `al_`,
+  `whd_`.
+- `next_charge_amount_cents` is filled on subscription list, retrieve and
+  mutation responses and on every `subscription.*` webhook, not only on
+  retrieve.
+- `expand` needs the expanded resource's read scope; without it the call
+  is a `403 insufficient_scope` with `param` `expand`.
+- A payment the provider refuses is a `402` with type `payment_error` and code
+  `payment_refused` (was `invalid_request_error` / `parameter_invalid` with
+  `reason` `payment_refused`). It throws `PaymentException`.
+- A missing required field is a `400` with code `parameter_missing`, naming the
+  field in `param`.
+- `refunds->create()` on a payment whose state rules a refund out (not paid,
+  outside its refund window) is a `409` `ConflictException` with code
+  `state_conflict` (was a `400`).
+- Renamed fields, in requests, responses and webhook payloads alike:
+  `payment_method` on checkout sessions and one-off payments (was `method`;
+  the model constants are now `PAYMENT_METHOD_*`), `reversed_at` on disputes
+  (was `reversed`), `test_clock_id` on customers (was `test_clock`).
+- `subscriptions` `status` and `renewal_state`, `disputes` `status` and
+  `events` `type` are list filters: pass a PHP list and it is sent
+  comma-joined (`['status' => ['active', 'past_due']]`). One string is still
+  sent as given. `invoices` and `oneShotPayments` take exactly one `status`,
+  from a closed set.
+- `percent_off` on a coupon takes up to two decimal places (more than 0, at
+  most 100): send an `int` or a `float`. `Coupon::$percent_off` and
+  `CouponValidation::$percent_off` are `?float`.
+- `OneShotPayment::$metadata` is always an object, `[]` when none was set.
+- `BillingPortalSession::$subscription_id` (and the revocation's) is nullable.
+- `customers->purge()` returns a `PurgedResource`
+  (`id`, `object: "customer"`, `deleted: true`, `purged: true`) instead of the
+  erased customer, whose placeholder email would read as live data.
+- `invoice.*` events carry the invoice's real `lines` in `data`.
+- `Invoice::STATUS_DRAFT` is gone: the API never issues a draft.
+- `ProviderPayload::$redacted` says when the stored provider payload was
+  redacted.
+- Every operation documents a `500` with the error envelope.
+
+### Hardening
+
+- A body that `json_encode()` cannot represent (a string that is not valid
+  UTF-8, `INF`, `NAN`) throws `\InvalidArgumentException` naming the route,
+  with the `\JsonException` as `getPrevious()`, before any request. A raw
+  `\JsonException` escaped before. The value is not quoted in the message.
+- `ApiException::$errorType` for a 404 or 409 with no error body is
+  `not_found_error` / `conflict_error`, the API's own values (it was
+  `invalid_request_error` / `conflict`), matching node and python.
+- `Webhooks::verifySignature()` refuses a whitespace-only secret, as it
+  already refused an empty one.
+- A path id of `.` or `..` is refused with `\InvalidArgumentException`
+  before any request; URL normalisation resolved them as dot segments.
+- The README and AGENTS.md tier examples use `unit_amount_cents` and
+  `flat_amount_cents`; `unit_amount` / `flat_amount` are refused by the API.
+  The README says a 501 is not retried, which was already the behaviour.
+
+### Upgrading from 0.x
+
+**1. Responses are typed objects, and array access still works.** Every method
+returns a generated class (`BillKit\Model\Customer`, `Subscription`, ...) with
+typed, read-only properties. `$customer['id']` keeps working, so most code
+needs no change. What breaks is code that needs a real `array`:
+
+```php
+// 0.x
+function store(array $customer): void { ... }
+store($client->customers->retrieve($id));
+array_key_exists('name', $customer);
+$customer['metadata']['plan'] = 'pro';
+
+// 1.0
+store($client->customers->retrieve($id)->toArray());   // or type the parameter as Customer
+$customer->has('name');
+$copy = $customer->toArray(); $copy['metadata']['plan'] = 'pro';   // objects are immutable
+```
+
+`is_array($response)` is now false, objects cannot be written to, and a
+function typed `array` needs `->toArray()`. `json_encode($obj)` produces the
+same JSON as before, except that an empty JSON-object field such as `metadata`
+is now written as `{}`, as the API sent it, where the 0.x array gave `[]`.
+
+Every typed property is nullable, `id` included, and reads `null` when the
+payload lacks the field. Event payloads are stored snapshots, so an event
+recorded before a field existed does not carry it.
+
+**2. `all()` returns a `Collection`, not an array.** `$page['data']`,
+`$page['has_more']` and `foreach ($page['data'] as ...)` still work, and the
+items are typed objects. `foreach ($page as $item)` now iterates the items.
+
+**3. One calling convention: `(..., array $params = [], array $opts = [])`.**
+Request options moved out of `$params` into a final `$opts` array, and
+`idempotency_key` in `$params` now throws rather than being lifted out.
+
+```php
+// 0.x
+$client->refunds->create(['payment_id' => $id, 'idempotency_key' => 'r-1']);
+$client->subscriptions->cancel($id, 'cancel-1');
+$client->subscriptions->update($id, 'price_new', 'swap-1');
+$client->subscriptions->previewUpdate($id, 'price_new');
+$client->subscriptions->reauthorizePaymentMethod($id, $returnUrl);
+$client->webhookEndpoints->delete($id, 'drop-1');
+
+// 1.0
+$client->refunds->create(['payment_id' => $id], ['idempotency_key' => 'r-1']);
+$client->subscriptions->cancel($id, [], ['idempotency_key' => 'cancel-1']);
+$client->subscriptions->update($id, ['target_price_id' => 'price_new'], ['idempotency_key' => 'swap-1']);
+$client->subscriptions->previewUpdate($id, ['target_price_id' => 'price_new']);
+$client->subscriptions->reauthorizePaymentMethod($id, ['return_url' => $returnUrl]);
+$client->webhookEndpoints->delete($id, [], ['idempotency_key' => 'drop-1']);
+```
+
+The same applies to every positional `$idempotencyKey`: `apiKeys->revoke`,
+`billingPortalSessions->revoke`, `customers->delete`, `invoices->sendEmail`,
+`subscriptions->cancel` / `pause` / `resume` / `reactivate`,
+`testClocks->delete`, `webhookEndpoints->rotateSecret` / `redeliver`. Request
+options also gained `timeout` (seconds), `max_retries` and `headers`. An
+unknown option throws `\InvalidArgumentException`.
+
+**3a. Timeouts are in seconds**, as in Guzzle and stripe-php. The constructor
+argument `int $timeoutMs` is now `float $timeout`:
+
+```php
+// 0.x
+new BillKitClient(apiKey: $key, timeoutMs: 15_000);
+// 1.0
+new BillKitClient(apiKey: $key, timeout: 15.0);
+```
+
+The `timeout` request option is seconds too (`['timeout' => 2.5]`). A value
+that is not a number greater than 0, or that is above 600 seconds, throws
+`\InvalidArgumentException`.
+
+**A positional 0.x timeout would now mean hours, and is refused.** The third
+constructor argument was `$timeoutMs` and is now `$timeout`, so a positional
+call still type-checks:
+
+```php
+// 0.x: 30 seconds
+new BillKitClient($key, null, 30000);
+// 1.0: would be 30000 seconds (8.3 hours), so it throws instead:
+//   InvalidArgumentException: ... over the 600-second maximum. Timeouts are
+//   seconds since 1.0 (0.x took milliseconds) ...
+new BillKitClient($key, null, 30.0);
+```
+
+**4. `autoPagingIterator()` takes the same `$params` as `all()`.** Page size is
+`limit`, and filters are the API's names:
+
+```php
+// 0.x
+$client->events->autoPagingIterator(50, 'customer.created');
+$client->subscriptions->autoPagingIterator(100, ['status' => 'active']);
+$client->auditLogs->autoPagingIterator(resourceId: $id);
+$client->subscriptions->autoPagingIteratorUsageRecords($id, 100, 'pending');
+
+// 1.0
+$client->events->autoPagingIterator(['limit' => 50, 'type' => 'customer.created']);
+$client->subscriptions->autoPagingIterator(['limit' => 100, 'status' => 'active']);
+$client->auditLogs->autoPagingIterator(['resource_id' => $id]);
+$client->subscriptions->autoPagingIteratorUsageRecords($id, ['limit' => 100, 'invoice_id' => 'pending']);
+```
+
+Every iterator yields typed objects. `BillKit\Collection::autoPagingIterator()`
+is now an instance method on a page (continue from a page you hold); the 0.x
+static helper is gone.
+
+**5. `customers->purge()` needs the confirmation.** 0.x sent
+`confirmed: true` for you, which made the API's guard against an accidental
+erasure guard nothing. Without it, 1.0 throws `\InvalidArgumentException` and
+sends nothing.
+
+```php
+// 0.x
+$client->customers->purge($id);
+// 1.0
+$client->customers->purge($id, ['confirmed' => true]);
+```
+
+**6. Exceptions: renamed, regrouped, and `WebhookVerificationException` joins
+the family.**
+
+> **`catch (ApiException $e)` now catches 4xx errors too.** In 0.x
+> `ApiException` was the parent of `ServerException` only, so a handler written
+> as `catch (ApiException)` meant "BillKit had a server error". In 1.0 it is
+> the parent of every HTTP error class: a 404, a 409 or a 422 now lands in that
+> same handler, and anything there that retries, alerts or reports an outage
+> fires on your own request mistakes. **Catch `ServerException` for the old
+> meaning.**
+
+```php
+// 0.x: a 5xx only
+catch (ApiException $e) { /* page someone */ }
+// 1.0: the same meaning
+catch (ServerException $e) { /* page someone */ }
+```
+
+| 0.x | 1.0 |
+|---|---|
+| `PermissionException` | `PermissionDeniedException` |
+| `ResourceMissingException` | `NotFoundException` |
+| `ApiException` (parent of `ServerException` only) | `ApiException`, parent of **every** HTTP error class |
+| `WebhookVerificationException extends \RuntimeException` | `extends BillKitException` |
+| `BillKitException::fromResponse()` | `ApiException::fromResponse()` (internal) |
+| (none) | `ApiTimeoutException extends ApiConnectionException` |
+
+HTTP error properties (`statusCode`, `errorType`, `errorCode`, `param`,
+`reason`, `requestId`, `rawBody`) moved from `BillKitException` to
+`ApiException`, which adds `headers`; `statusCode` is a non-null `int`.
+`catch (BillKitException $e)` still catches every API error, and now also
+catches a webhook verification failure: if you relied on it not doing so,
+catch `WebhookVerificationException` first. Constructors are internal and
+take `$previous` last.
+
+**7. Webhooks return typed events.** `Webhooks::verifySignature()` returns a
+`BillKit\Model\Event`, as its typed subclass when the type is known
+(`SubscriptionUpdatedEvent`, whose `data` is a `Subscription`). Array reads
+(`$event['type']`, `$event['data']['id']`) still work. `previous_attributes`
+is now always present and `null` when nothing changed, rather than absent.
+
+**8. Renamed methods.**
+
+| 0.x | 1.0 |
+|---|---|
+| `tenant->capabilities()` | `tenant->retrieveCapabilities()` |
+| `tenant->portalBranding()` | `tenant->retrievePortalBranding()` |
+| `tenant->billingProfile()` | `tenant->retrieveBillingProfile()` |
+| `webhookEndpoints->allDeliveries()` | `webhookEndpoints->listDeliveries()`, the name node uses and the `list*` spelling of `listUsageRecords()` / `listEventTypes()` |
+
+**9. Coupons follow API 1.0.** `discount_value` is gone: send `percent_off`
+(up to two decimal places) or `amount_off_cents` (minor units), and read the same fields
+back. `discount_type` is optional and is `'percent'` or `'fixed_amount'`
+(was `'fixed_cents'`).
+
+**10. Internals are internal.** `BillKitClient::$transport` is private, and
+`Transport`, `RequestOptions`, `BaseResource` (and its constructor), the
+`RetryPolicy` decision methods and `Model\Registry` are marked `@internal`.
+`new RetryPolicy(...)` and `withMaxAttempts()` stay public.
+
+**11. A 2xx response whose body is not JSON throws.** 0.x decoded it to an
+empty array. It is nearly always something answering in the API's place (a
+captive portal, a proxy's error page, a `baseUrl` that is not the API), and
+1.0 throws `ApiException` itself, with the status, headers and the body as
+received in `httpBody`. An empty 2xx body is still an empty result.
+
+**12. Renamed fields.** Request keys and response properties moved together:
+
+| 0.x | 1.0 |
+|---|---|
+| `checkoutSessions->create(['method' => ...])`, `$session->method` | `'payment_method'`, `$session->payment_method` |
+| `oneShotPayments->create(['method' => ...])`, `$payment->method` | `'payment_method'`, `$payment->payment_method` |
+| `customers->create(['test_clock' => ...])`, `$customer->test_clock` | `'test_clock_id'`, `$customer->test_clock_id` |
+| `$dispute->reversed` | `$dispute->reversed_at` |
+| `CheckoutSession::METHOD_*`, `OneShotPayment::METHOD_*` | `PAYMENT_METHOD_*` |
+| `customers->purge()` returns `Customer` | returns `PurgedResource` |
+
+**13. Build the client where it is used.** A missing API key has always thrown
+from the constructor, and 1.0 adds a whitespace-only one (`'  '`, a stray
+newline from a secrets file), which 0.x accepted and sent as a broken bearer
+token. Either way the throw happens wherever the client is built, which
+matters when one object both calls the API and verifies webhooks: built
+eagerly in its constructor, a missing key takes the webhook route down with
+it, although verification only ever needed the signing secret. One
+integration answered every delivery with a 500 instead of a 401 that way.
+`Webhooks::verifySignature()` needs no client, so build `BillKitClient` lazily,
+on first use, and pass `null` (or leave `apiKey` out) to read
+`BILLKIT_API_KEY` rather than `getenv('BILLKIT_API_KEY') ?: ''`.
+
+### Added
+- `ApiException::factory(int $status, array $error = [], array $headers = [])`,
+  the supported way to build an HTTP error in your own tests. It returns the
+  subclass a real response with that status would produce.
+- `ApiException::$httpBody`, the response body exactly as received.
+- `PaymentException`, thrown for a 402: `errorCode` is `payment_refused` when
+  the payment provider declined a charge or refund (its reason is in the
+  message), or `tenant_suspended` when the account behind the key is
+  suspended. A 402 was an `InvalidRequestException` before, which told the
+  caller to change a request that was not at fault. Not retried.
+- `Collection` can be serialized (`Cache::remember()`); a restored page holds
+  its items but cannot fetch further, and its `autoPagingIterator()` throws
+  `\LogicException` after them when `has_more` is true. A page built with
+  `Collection::constructFrom()` behaves the same way. An undeclared field of a
+  page is readable as `$page->field`.
+- Typed response classes in `BillKit\Model`, generated from the published
+  OpenAPI document by `tools/generate-models.php`; a test fails when
+  regenerating would change them. Enum values are class constants
+  (`Subscription::STATUS_ACTIVE`); enums stay open strings.
+- One typed event class per webhook event type, and `Registry`-driven decoding
+  of `events->retrieve()` / `events->all()` into the same classes.
+- Request options `timeout`, `max_retries` and `headers`.
+- `ApiTimeoutException`, and `ApiException::$headers`.
+- `Collection` with `data`, `has_more`, `isEmpty()`, `toArray()` and an
+  instance `autoPagingIterator()` that keeps the page's filters and options.
+- `BillKitObject::has()`, `keys()`, `toArray()` and `constructFrom()`.
+- `.gitattributes`, so the Packagist dist ships only the library, its licence
+  and its docs.
+
+- `$client->testClocks`: `create`, `retrieve`, `advance`, `delete`, `all` and
+  `autoPagingIterator` over `/v1/test_clocks`. Test mode only. Attach a
+  customer with `customers->create(['test_clock' => ...])`.
+- `BillKit\EventType` constants (e.g. `EventType::INVOICE_PAID`), plus
+  `EventType::all()` and `EventType::isKnown()`, checked against the API's
+  event catalogue. An unknown type is still never an error: a newer API can
+  deliver one this list does not name.
+- `ApiException::$reason`, the envelope's finer-grained cause. A
+  `409 operation_pending` from `subscriptions->cancel`, `pause` or `update`
+  while a renewal payment is still settling carries `'renewal_processing'`.
+- `coupons->create(['currency' => ...])` is documented (the currency of a
+  fixed-amount discount and of `min_amount_cents`; required with either when
+  the account has several currencies).
+
+### Changed
+- `composer.json` requires `php: ^8.1` (was `>=8.1`).
+- `ext-curl` moved from `require` to `suggest`: only the bundled transport
+  needs it, and a host that injects a PSR-18 client can now install the SDK
+  without it. With neither, constructing the client throws a
+  `\RuntimeException` naming both ways out.
+- The `php-http/discovery` suggestion is gone. Nothing in the SDK uses it;
+  pass a PSR-18 client and PSR-17 factories explicitly.
+- Query keys are forwarded as given, as node does (python sends one through
+  `extra_query=`), including one this version does not know, so a filter the API adds in a later 1.x works
+  without upgrading the SDK. A key the route does not take is the API's
+  `400 parameter_unknown` (`InvalidRequestException`, key in `param`). Query
+  values are still type-checked locally. The generated
+  `BillKit\Model\QueryParameters` (internal) is removed.
+- A query value with no query-string form (an object, a nested array) throws
+  `\InvalidArgumentException` instead of being cast.
+
+### Fixed
+- A whitespace-only API key (`'  '`, `"\n"`) is refused at construction, by
+  `BillKitClient` and `Transport` both, as node and python refuse it. It was
+  accepted and sent as `Authorization: Bearer   `, so every call failed with
+  a 401. A whitespace-only `BILLKIT_API_KEY` counts as unset.
+- An empty array in a field the API types as an object (`metadata` on every
+  route that takes it, `theme` and `capabilities` on
+  `tenant->setPortalBranding()`) is sent as `{}`. `json_encode([])` wrote
+  `[]`, a list, and the API refused the call with a 400, so
+  `['metadata' => []]` could not empty a customer's metadata. The fields are
+  generated per route from the OpenAPI document into
+  `BillKit\Model\RequestMaps` (internal); a list such as `enabled_events`
+  keeps its `[]`.
+- `coupons->validate()` dropped every key but `code`, `price_id` and
+  `amount_cents`, so a `currency` never reached the API. It is now sent; a
+  coupon in another currency comes back `valid: false` with
+  `reason: 'coupon_currency_mismatch'`.
+- A blank or whitespace-only `idempotency_key` is treated as unset and replaced
+  with a generated key. It used to send an empty `Idempotency-Key` header while
+  the SDK still retried the POST.
+- An empty or whitespace-only id (`customers->retrieve('')`) throws
+  `\InvalidArgumentException` before any request, instead of calling
+  `/v1/customers/`.
+- `tenant->setPortalBranding()` can clear a field: an explicit `null` on any of
+  `business_name`, `support_email`, `logo_url`, `theme` and `capabilities` is
+  sent rather than stripped. An empty string was never a clear (it is a 422).
+- `tenant->setBillingProfile()` sends the body as given, like every other
+  update, so a misspelt key is refused by the API instead of silently dropped.
+- `Webhooks::verifySignature()` throws `\InvalidArgumentException` for an empty
+  secret (an HMAC under an empty key is one anyone can compute) or a negative
+  tolerance, and refuses a `t=` longer than ten digits as malformed.
+- A `CR`, `LF` or `NUL` in a `headers` option name or value, or in
+  `idempotency_key`, throws `\InvalidArgumentException`. The bundled curl
+  transport would otherwise have written a second header of the caller's
+  choosing.
+- `501 Not Implemented` is no longer retried: it is a permanent answer, and the
+  retry budget only delayed it.
+
 ## [0.9.0] - 2026-10-09
 
 ### Added
@@ -78,7 +467,7 @@ cadence.
   - It answers "everything that ever happened to this customer", which is the
     question an audit log mostly exists for.
   - The API has always accepted a `resource_id` filter and `all()` could
-    always forward it, because `all()` takes an array — but the iterator named
+    always forward it, because `all()` takes an array, but the iterator named
     only three of the four, so a scoped walk meant dropping back to manual
     pagination.
   - Matches exactly, and combines with `$resourceType` rather than replacing
@@ -95,8 +484,8 @@ cadence.
   request surfaces: `methods.recurring_vocabulary`,
   `methods.one_shot_vocabulary` and `methods.banktransfer_settles_in_days`.
   - No behaviour change. They describe what the server already accepted.
-  - This package names no method anywhere — it forwards whatever array it is
-    handed — so those scenarios are the only thing holding it to the same wire
+  - This package names no method anywhere, it forwards whatever array it is
+    handed, so those scenarios are the only thing holding it to the same wire
     contract the node and python unions spell out.
 
 ## [0.5.0] - 2026-09-22
@@ -115,7 +504,7 @@ cadence.
 - **The exception class is now chosen by the HTTP status, not the envelope
   `type`.** A request that never reaches a route handler is serialised by the
   API's framework-level handler as `{"type": "api_error"}` *with a 4xx status*,
-  so a plain `404` — a typo'd id, an SDK/API version skew — was thrown as
+  so a plain `404`, a typo'd id, an SDK/API version skew, was thrown as
   `ServerException`. That told callers BillKit had broken when their own
   request was at fault, and `ServerException` is the class retry and alerting
   policies key on. `errorType` still carries the envelope value verbatim. Node
@@ -123,7 +512,7 @@ cadence.
 - **`409 idempotency_in_progress` is retried.** It means a request carrying the
   same `Idempotency-Key` is still in flight, so the charge may already have
   happened; surfacing it immediately invited the one workaround that turns a
-  single charge into two — retrying with a fresh key. The retry reuses the
+  single charge into two, retrying with a fresh key. The retry reuses the
   original key, so it either loses the race again or replays the first call's
   result. Every other 409 still fails fast. `RetryPolicy::shouldRetry()` takes
   a fourth `?string $errorCode` argument for this; it defaults to `null`.
@@ -131,15 +520,15 @@ cadence.
 ## [0.4.0]
 
 ### Added
-- **`$client->creditNotes`** — `retrieve`, `all` and `autoPagingIterator`. A
+- **`$client->creditNotes`**, `retrieve`, `all` and `autoPagingIterator`. A
   credit note is the document that reverses an issued invoice; one is created
   for you when a refund settles, so there is no `create` here. `all` takes
   `invoice_id` to answer "was this sale credited, and by how much".
-- **`$client->invoices->void($id)`** — records that an invoice was never owed.
+- **`$client->invoices->void($id)`**, records that an invoice was never owed.
   It keeps its number and stays readable; it just stops being a receivable.
 
   A **paid** invoice is refused with a `ConflictException` whose `errorCode` is
-  `invoice_not_voidable`. Once the money has moved, "never owed" is not true —
+  `invoice_not_voidable`. Once the money has moved, "never owed" is not true.
   refund the payment instead, and a credit note is issued when the refund
   settles. Voiding twice is a no-op.
 
@@ -152,7 +541,7 @@ cadence.
   This bit real calls, not just new ones: `$client->customers->update($id)`
   with no fields, any `update()` where every value you passed was `null` (they
   are stripped before encoding), `update()` given only an `idempotency_key`,
-  and `$client->tenant->setPortalBranding()`. Only the empty case is affected —
+  and `$client->tenant->setPortalBranding()`. Only the empty case is affected.
   arrays that are genuinely lists, like `tiers` and `enabled_events`, are
   unchanged.
 
@@ -175,8 +564,8 @@ surface.
   defaulted. The last band must be `'up_to' => 'inf'`.
 - **`identifier` on `createUsageRecord()`**, for the retry an idempotency key
   cannot catch. The key covers a retry of one HTTP request; `identifier` covers
-  a retry of *your own* call — a job runner replaying a task, a queue delivering
-  twice — which arrives as a genuinely new request with a new key. It is unique
+  a retry of *your own* call, a job runner replaying a task, a queue delivering
+  twice, which arrives as a genuinely new request with a new key. It is unique
   within the subscription, and a second report of the same identifier returns
   the first record unchanged rather than billing twice. If your reporting
   pipeline is at-least-once, this is the one that matters.
@@ -195,7 +584,7 @@ surface.
   `\InvalidArgumentException` before the request is sent, at the price level and
   inside every tier. It is not coerced: coercing would work for the rates that
   happen to round-trip through a double and silently mis-price the ones that do
-  not. An `int` is accepted and stringified, because an integer is exact — only
+  not. An `int` is accepted and stringified, because an integer is exact, only
   the float is a lie.
 
   `refund_on_cancel` is also documented on `prices->create()` for the first
@@ -229,7 +618,7 @@ surface.
 - `delete()` on `products`, `prices`, `coupons`, `taxRates` and
   `webhookEndpoints`. None of them deleted anything: every one of those rows
   stays readable afterwards, which is why they have to. Retire them through the
-  update route instead — `['active' => false]` for products, prices, tax rates
+  update route instead, `['active' => false]` for products, prices, tax rates
   and coupons, `['status' => 'disabled']` for webhook endpoints. The server no
   longer answers `DELETE` on those paths at all.
 
@@ -288,7 +677,9 @@ First public release.
   is what lets Monolog, Laravel's `Log` channel and Symfony's logger all drop
   straight in.
 
-[Unreleased]: https://github.com/billkit-eu/billkit-php/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/billkit-eu/billkit-php/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/billkit-eu/billkit-php/compare/v0.9.0...v1.0.0
+[0.9.0]: https://github.com/billkit-eu/billkit-php/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/billkit-eu/billkit-php/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/billkit-eu/billkit-php/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/billkit-eu/billkit-php/compare/v0.7.0...v0.7.1

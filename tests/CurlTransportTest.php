@@ -39,6 +39,21 @@ final class CurlTransportTest extends TestCase
         $client->customers->retrieve('cus_1');
     }
 
+    public function testAHeaderCarryingCrlfIsRefusedBeforeCurlSeesIt(): void
+    {
+        // curl writes "Name: value" verbatim, so this would otherwise send
+        // a second header of the caller's choosing. Refused before any
+        // connection is attempted, hence not an ApiConnectionException.
+        $client = new BillKitClient(
+            apiKey: 'bk_test_unit',
+            baseUrl: 'http://127.0.0.1:1',
+            retryPolicy: new RetryPolicy(maxAttempts: 1, initialBackoffMs: 0, backoffMultiplier: 1.0, maxBackoffMs: 0, jitter: 0.0),
+        );
+
+        $this->expectException(\InvalidArgumentException::class);
+        $client->customers->retrieve('cus_1', [], ['headers' => ['X-Trace' => "a\r\nX-Injected: 1"]]);
+    }
+
     public function testPersistentHandleServesSequentialCalls(): void
     {
         $transport = new Transport(

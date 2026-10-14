@@ -107,7 +107,7 @@ final class RetryTest extends BillKitTestCase
      */
     private static function conflict(string $code): array
     {
-        return ['error' => ['type' => 'conflict', 'code' => $code, 'message' => 'in flight']];
+        return ['error' => ['type' => 'conflict_error', 'code' => $code, 'message' => 'in flight']];
     }
 
     public function testInProgressConflictIsRetriedThenReplays(): void
@@ -142,9 +142,36 @@ final class RetryTest extends BillKitTestCase
         }
     }
 
+    public function testNotImplementedIsNotRetried(): void
+    {
+        // 501 says the server does not support the request at all; asking
+        // three more times only delays the same answer.
+        $http = (new MockHttpClient())
+            ->stage(501, ['error' => ['type' => 'api_error', 'message' => 'not implemented']])
+            ->stage(200, ['id' => 'cus_1']);
+        $client = $this->makeClient($http);
+
+        try {
+            $client->customers->create(['email' => 'a@b.co']);
+            self::fail('expected ServerException');
+        } catch (ServerException $e) {
+            self::assertSame(501, $e->statusCode);
+            self::assertCount(1, $http->requests);
+        }
+    }
+
+    public function testEveryOtherServerErrorIsStillRetried(): void
+    {
+        $policy = new \BillKit\RetryPolicy();
+        foreach ([500, 502, 503, 504, 505, 599] as $status) {
+            self::assertTrue($policy->shouldRetry($status, 1), "{$status} should be retried");
+        }
+        self::assertFalse($policy->shouldRetry(501, 1));
+    }
+
     public function testConflictWithoutACodeIsNotRetried(): void
     {
-        $http = (new MockHttpClient())->stage(409, ['error' => ['type' => 'conflict', 'message' => 'clash']]);
+        $http = (new MockHttpClient())->stage(409, ['error' => ['type' => 'conflict_error', 'message' => 'clash']]);
         $client = $this->makeClient($http);
 
         try {
